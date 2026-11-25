@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      1.7.1
+// @version      1.7.2
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -1119,6 +1119,10 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
     window.__csInboxHelper = true;
     onStop(() => { window.__csInboxHelper = false; });
 
+    // 1.7.2: bagian ini disamakan dengan "Inbox Helper (LiveChat & Text)" 1.4.10 (pemilik):
+    // baca memori aplikasi (LiveChat Redux / Text react-query) buat status dibalas & jam pesan persis, cuma chat di "My chats",
+    // timer ga loncat (ageWin), kedip lebih ringan, Alt+↑/↓ pakai hasil pindai terakhir, menu setelan rapi.
+
     // ===================== PENGATURAN =====================
     const AUTO_JEDA = 800;     // auto-tutup: tunggu sebentar sesudah chat jadi Archived (ms)
     const SIMPAN_JAM = 24;     // catatan jam masuk per chat disimpan 24 jam
@@ -1127,13 +1131,17 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
 
     const KEY = 'csInboxHelper.v1';
     const KEY_AUTO = 'csInboxHelper.auto';
-    const KEY_SET = 'csInboxHelper.set';      // 1.1.0 setelan (tombol ⚙)
+    const KEY_SET = 'csInboxHelper.set';      // 1.1.0 setelan
     const ARCH_RE = /^\s*archived\s*[-–—]/i;          // "Archived - 3 min inactivity"
+    // chat selesai: teks "Archived - ..." ATAU (LiveChat) status chat di memori aplikasi = 2 (ditutup)
+    const isDone = (it) => it.archived && (ARCH_RE.test(it.text) || it.closed);
     const TRF_RE = /^\s*transferred\s*[-–—]/i;        // "Transferred - by Lily to CS ..."
     const AGE_RE = /^(\d+)\s*(s|m|h|d)$/i;                      // label jam di daftar: 6s / 2m / 1h
     const UNIT = { s: 1, m: 60, h: 3600, d: 86400 };
     const X_PATHS = ['m6 6 12 12m0-12L6 18', 'M18 6L6 18M6 6L18 18', 'M6 18L18 6M6 6L18 18',
       'M18 6L6 18M6 6l12 12', 'M6 18L18 6M6 6l12 12'];
+    // memori React cuma kebaca dari dokumen halaman asli (script ini pakai @grant)
+    const PD = PW.document || document;
 
     const log = (...a) => { if (DEBUG) console.log('[CS Inbox]', ...a); };
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1148,9 +1156,17 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
       }
       return null;
     }
-    function ageOf(el) {                  // detik dari label jam
+    function ageOf(el) {                  // detik dari label jam (batas bawah: "1m" = 60)
       const m = el && AGE_RE.exec(el.textContent.trim());
       return m ? +m[1] * UNIT[m[2].toLowerCase()] : 0;
+    }
+    // "1m" = 60..119 dtk dan label bawaan diperbarui telat -> timer hanya disetel ulang kalau keluar dari rentang ini
+    const SLACK = { s: 5, m: 60, h: 600, d: 3600 };
+    function ageWin(el) {
+      const m = el && AGE_RE.exec(el.textContent.trim());
+      if (!m) return null;
+      const u = m[2].toLowerCase(), lo = +m[1] * UNIT[u];
+      return { lo, hi: lo + UNIT[u], slack: SLACK[u] };
     }
     function isX(btn) {
       const lab = [btn.getAttribute('aria-label'), btn.getAttribute('title'), btn.getAttribute('data-testid')].join(' ');
@@ -1182,32 +1198,89 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
       if (v) { if (el.getAttribute(k) !== v) el.setAttribute(k, v); }
       else if (el.hasAttribute(k)) el.removeAttribute(k);
     }
+
     // ---------- LiveChat (my.livechatinc.com) ----------
+    // data chat dari memori aplikasi LiveChat (Redux: entities.chats.threads[threadId] {status 0 aktif / 2 ditutup,
+    // currentAgentId}, entities.chats.events.byIds[threadId] {authorType customer|agent, authorId, type, timestampInMs}).
+    // HANYA dibaca. Tidak ketemu -> cara lama (ikon ↰ / teks Archived).
+    const LCS = { store: null, miss: 0 };
+    const LCI = new Map();                // tid -> {th, evs, r}
+    function lcStore() {
+      const ok = (s) => { try { return !!s.getState().entities.chats.threads; } catch (e) { return false; } };
+      if (LCS.store && ok(LCS.store)) return LCS.store;
+      LCS.store = null;
+      if (Date.now() - LCS.miss < 5000) return null;
+      const li = PD.querySelector('li[data-testid^="chat-item-"]');
+      const fk = li && Object.keys(li).find((k) => k.startsWith('__reactFiber$'));
+      for (let f = fk && li[fk], i = 0; f && i < 400; f = f.return, i++) {
+        for (const o of [f.memoizedProps, f.memoizedProps && f.memoizedProps.value]) {
+          const s = o && (o.store || o);
+          if (s && typeof s.getState === 'function' && ok(s)) return (LCS.store = s);
+        }
+      }
+      LCS.miss = Date.now();
+      return null;
+    }
+    function lcInfo(tid) {
+      const s = lcStore();
+      if (!s) return null;
+      let C;
+      try { C = s.getState().entities.chats; } catch (e) { return null; }
+      const th = C && C.threads && C.threads[tid];
+      if (!th) return null;
+      const evs = (C.events && C.events.byIds && C.events.byIds[tid]) || {};
+      const hit = LCI.get(tid);                     // data memori tidak berubah (objek sama) -> hasil lama
+      if (hit && hit.th === th && hit.evs === evs) return hit.r;
+      let last = null;
+      for (const e of Object.values(evs)) {
+        // hanya pesan yang terlihat member (customer / agent); Internal note (supervisor) & event sistem / rating dilewati
+        if (!e || e.isDeleted || (e.authorType !== 'customer' && e.authorType !== 'agent')) continue;
+        if (!/^(message|file|rich_message)$/.test(e.type)) continue;
+        if (!last || (+e.timestampInMs || 0) > (+last.timestampInMs || 0)) last = e;
+      }
+      const r = { status: +th.status, cur: th.currentAgentId || '', last };
+      if (LCI.size > 500) LCI.clear();
+      LCI.set(tid, { th, evs, r });
+      return r;
+    }
     const LC = {
       items() {
         const out = [];
+        const mine = document.querySelector('[data-testid="my-chats"]');
         for (const li of document.querySelectorAll('li[data-testid^="chat-item-"]')) {
           const id = li.getAttribute('data-testid').slice(10);
           const text = txt(li.querySelector('[data-testid="last-message-text"]'));
           const row = li.querySelector('.chat-item') || li;
           const ageEl = ageNode(li, '[data-testid="last-message-text"],[data-testid="visitor-name"]');
-          out.push({
+          const it = {
             id, wrap: li, el: row, clickEl: row,
             name: txt(li.querySelector('[data-testid="visitor-name"]')), text,
             archived: ARCH_RE.test(text), transfer: TRF_RE.test(text),
             replied: !!li.querySelector('[data-testid="replied"]'),
-            // 1.3.2: member mengetik -> teks terakhir diganti sneak-peek & ikon replied hilang (HTML asli pemilik 21 Nov)
+            // member mengetik -> teks terakhir diganti sneak-peek & ikon replied hilang
             typing: !!li.querySelector('[data-test="typing-indicator"],[data-testid="sneak-peek-text"]'),
             age: ageOf(ageEl), ageEl, nameEl: li.querySelector('[data-testid="visitor-name"]'),
             open: location.pathname.includes('/' + id),
             group: '',
-          });
+            mine: !mine || mine.contains(li),
+          };
+          const inf = lcInfo(id);
+          if (inf) {
+            if (inf.status === 2) { it.archived = true; it.closed = true; }   // 2 = ditutup (This chat has been archived)
+            if (inf.last) {
+              // sudah dibalas = pesan terakhir dari agent yang memegang chat (pesan bot sebelum transfer TIDAK dihitung)
+              it.replied = inf.last.authorType === 'agent' && (!inf.cur || inf.last.authorId === inf.cur);
+              it.lastTs = +inf.last.timestampInMs || 0;
+              it.fromStore = true;
+            }
+          }
+          out.push(it);
         }
         return out;
       },
       orderBox: () => document.querySelector('[data-testid="my-chats"]'),
       canOrder: () => true,               // daftar LiveChat tidak virtual -> aman diurut ulang
-      // 1.0.7: bar di baris "My chats (n)"; tidak ada -> di samping judul "Chats"
+      // bar di baris "My chats (n)"; tidak ada -> di samping judul "Chats"
       header() {
         const t = document.querySelector('[data-testid="my-chats-title"]');
         if (t) return t.closest('button') || t;
@@ -1216,7 +1289,7 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
       },
       sortDir: () => dirFrom(document.getElementById('chats-list-column')),
       async close(it) {
-        if (!ARCH_RE.test(it.text)) return false;
+        if (!isDone(it)) return false;
         const btn = it.wrap.querySelector('button[data-testid="list-close-chat-button"]') || findX(it.wrap);
         if (!btn) return false;
         btn.click();
@@ -1231,6 +1304,7 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
         const root = this.root();
         if (!root) return [];
         const out = [];
+        const my = this.myGroups(root);
         for (const a of root.querySelectorAll('a[href*="/inbox/chats/"]')) {
           const m = (a.getAttribute('href') || '').match(/\/inbox\/chats\/[^/]+\/([^/?#]+)\/([^/?#]+)/);
           if (!m) continue;
@@ -1243,7 +1317,7 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
           const wrap = a.closest('[data-index]') || a;
           const act = card.querySelector('button[aria-label]');
           const ageEl = ageNode(card.querySelector('[class*="message-list-item-header__right-node"]'));
-          out.push({
+          const it = {
             id: m[2], chatId: m[1], wrap, el: card, clickEl: a,
             name: act ? act.getAttribute('aria-label') : '', text,
             archived: /message-list-item--inactive/.test(cls) || ARCH_RE.test(text),
@@ -1255,11 +1329,26 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
             open: /message-list-item--active/.test(cls) || a.getAttribute('aria-current') === 'page'
               || location.pathname.includes('/' + m[2]),
             group: wrap.getAttribute('data-item-group-index') || '',
-          });
+          };
+          it.mine = !it.group || !my.known || my.set.has(it.group);
+          const inf = txInfo(m[1], m[2]);
+          if (inf) { it.replied = inf.replied; it.lastTs = inf.ts; it.fromStore = true; }
+          out.push(it);
         }
         return out;
       },
       orderBox() { const r = this.root(); return r && r.querySelector('[data-testid="virtuoso-item-list"]'); },
+      // nomor kelompok -> judul "My chats"? (diingat: daftar virtual, judul bisa tergulir keluar layar)
+      groups: new Map(),
+      myGroups(root) {
+        for (const b of root.querySelectorAll('[class*="group-header__button"]')) {
+          const w = b.closest('[data-index]');
+          if (!w || w.hasAttribute('data-item-group-index') || !w.hasAttribute('data-item-index')) continue;
+          this.groups.set(w.getAttribute('data-item-index'), /^\s*my chats\b/i.test(txt(b)));
+        }
+        const set = new Set([...this.groups].filter(([, v]) => v).map(([k]) => k));
+        return { known: set.size > 0, set };
+      },
       headerCount() {
         const r = this.root();
         const b = r && (r.querySelector('[class*="chat-list__group-label"]')
@@ -1283,7 +1372,7 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
         if ((parseFloat(box.style.paddingBottom) || 0) === 0) return true;
         return this.headerCount() === act.length;
       },
-      // 1.0.6: bar di baris "My chats n ▾" (atau "Chats n"); tidak ada -> di samping judul "All chats"
+      // bar di baris "My chats n ▾" (atau "Chats n"); tidak ada -> di samping judul "All chats"
       header() {
         const r = this.root();
         return (r && (r.querySelector('[class*="group-header__left"] > button')
@@ -1291,13 +1380,12 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
           || document.querySelector('[aria-label="Chat list header"] h5');
       },
       sortDir() { return dirFrom(this.root()); },
-      // 1.0.3: Text tidak punya tombol ✕. Buang ID chat Archived dari memori react-query daftar chat
+      // Text tidak punya tombol ✕. Buang ID chat Archived dari memori react-query daftar chat
       // (hanya di browser ini, TANPA request ke server).
-      // 1.4.0: elemen diambil lewat window asli halaman (script sekarang pakai @grant).
       qc: null,
       findQC() {
         if (this.qc && typeof this.qc.getQueryCache === 'function') return this.qc;
-        const root = (PW.document || document).querySelector('[aria-label="Chat list"]');
+        const root = PD.querySelector('[aria-label="Chat list"]');
         const fk = root && Object.keys(root).find((k) => k.startsWith('__reactFiber$'));
         if (!fk) return null;
         for (let f = root[fk], n = 0; f && n < 800; f = f.return, n++) {
@@ -1337,6 +1425,49 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
       },
     };
 
+    // Text -> data pesan dari memori aplikasi (HANYA BACA). Kunci: ["agent-chat-api","chats",<chat>,"threads",<sesi>,"events"]
+    // = daftar ID pesan, [..,"events",<ID>] = {created_at, visibility all|agents, type, text, author_id, system_message_type},
+    // [..,"threads",<sesi>,"users"] = [{id, type customer|agent, name}].
+    const TXI = new Map();
+    function txInfo(ck, tk) {
+      const qc = TX.findQC();
+      if (!qc || !ck || !tk) return null;
+      const base = ['agent-chat-api', 'chats', ck, 'threads', tk];
+      let list;
+      try { list = qc.getQueryData([...base, 'events']); } catch (e) { return null; }
+      if (!Array.isArray(list) || !list.length) return null;
+      const hit = TXI.get(tk);
+      if (hit && hit.list === list) return hit.r;            // daftar pesan tidak berubah (objek sama) -> hasil lama
+      const typ = {};
+      for (const key of [[...base, 'users'], ['agent-chat-api', 'chats', ck, 'users']]) {
+        let us = null;
+        try { us = qc.getQueryData(key); } catch (e) { /* */ }
+        for (const u of Array.isArray(us) ? us : Object.values(us || {})) if (u && u.id && !typ[u.id]) typ[u.id] = u.type;
+      }
+      const evs = [];
+      for (const x of list) {
+        let e = x;
+        if (typeof x === 'string') { try { e = qc.getQueryData([...base, 'events', x]); } catch (er) { e = null; } }
+        if (e && e.created_at) evs.push(e);
+      }
+      evs.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+      let r = null;
+      for (let i = evs.length - 1; i >= 0 && !r; i--) {
+        const e = evs[i], ts = Date.parse(e.created_at) || 0;
+        if (e.type === 'system_message') {
+          if (/transfer/i.test(String(e.system_message_type || '') + ' ' + String(e.text || ''))) r = { replied: false, ts };
+          continue;
+        }
+        if (!/^(message|file|rich_message)$/.test(e.type) || e.visibility === 'agents') continue;   // Internal note dilewati
+        const t = typ[e.author_id];
+        if (t === 'customer') r = { replied: false, ts };
+        else if (t === 'agent') r = { replied: true, ts };
+      }
+      if (TXI.size > 500) TXI.clear();
+      TXI.set(tk, { list, r });
+      return r;
+    }
+
     const A = SITE === 'text' ? TX : LC;
 
     // ---------- simpan jam masuk / mulai menunggu ----------
@@ -1350,7 +1481,7 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
       for (const k of Object.keys(st)) if (!(st[k].s > cut)) delete st[k];
       try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) { /* penuh / diblok */ }
     }
-    // 1.1.0 setelan per browser: blue = tandai semua yang belum dibalas, red = merah sesudah redMin menit, auto = bersihkan closed
+    // setelan per browser: blue = tandai semua yang belum dibalas, red = merah sesudah redMin menit, auto = bersihkan closed
     const cfg = { blue: true, red: true, redMin: 2, auto: true };
     try {
       cfg.auto = localStorage.getItem(KEY_AUTO) !== '0';
@@ -1373,8 +1504,7 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
       }
       for (const list of groups.values()) {   // chat aktif ditukar di antara posisinya sendiri
         const slots = list.map((it) => pos.get(it.wrap)).sort((a, b) => a - b);
-        // 1.0.2: chat biasa tetap urutan bawaan LiveChat/Text (jam pertama masuk);
-        // chat hasil transfer disisipkan menurut JAM TRANSFER.
+        // chat biasa tetap urutan bawaan LiveChat/Text (jam pertama masuk); chat hasil transfer disisipkan menurut JAM TRANSFER.
         const byPos = (a, b) => pos.get(a.wrap) - pos.get(b.wrap);
         const plain = list.filter((it) => !it.trf).sort(byPos);
         const trf = list.filter((it) => it.trf).sort((a, b) => dir * (a.entry - b.entry) || byPos(a, b));
@@ -1403,31 +1533,35 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
   box-shadow:0 4px 18px rgba(0,0,0,.18)}
 #csw-bar button{border:0;border-radius:999px;padding:4px 9px;cursor:pointer;font:inherit;white-space:nowrap;line-height:1.2}
 #csw-bar .csw-need{background:#e3edff;color:#1f5fd6}
-#csw-bar .csw-need.red{background:#e5484d;color:#fff;animation:cswPulse 1.6s infinite}
+#csw-bar .csw-need.red{background:#e5484d;color:#fff;position:relative}
+#csw-bar .csw-need.red::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  box-shadow:0 0 0 4px rgba(229,72,77,.25);opacity:0;will-change:opacity;animation:cswPulse 1.6s infinite}
 html[data-csw-dark] #csw-bar.csw-float{background:#1f2125;box-shadow:0 4px 18px rgba(0,0,0,.5)}
 html[data-csw-dark] #csw-bar .csw-need{background:rgba(92,145,255,.2);color:#9dbdff}
 html[data-csw-dark] #csw-bar .csw-need.red{background:#e5484d;color:#fff}
 #csw-native{border-top:1px solid rgba(128,128,128,.25);margin-top:4px;padding-top:4px;padding-bottom:4px;cursor:default;
   list-style:none;color:inherit}
-#csw-native .r,#csw-native .f{min-height:32px;padding:0 var(--csw-px,16px)}
-#csw-native .r{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;user-select:none}
-#csw-native .t{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;min-width:0;overflow:hidden}
-#csw-native input[type=number]{width:30px;padding:1px 2px;border:1px solid rgba(128,128,128,.45);border-radius:5px;font:inherit;
-  text-align:center;background:transparent;color:inherit;-moz-appearance:textfield}
+#csw-native .r{min-height:var(--csw-h,32px);padding:0 var(--csw-px,16px);box-sizing:border-box;display:flex;align-items:center;
+  justify-content:space-between;gap:24px;cursor:pointer;user-select:none}
+#csw-native .r:hover{background:rgba(128,128,128,.08)}
+#csw-native .t{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;min-width:0;overflow:hidden}
+#csw-native input[type=number]{width:28px;height:20px;box-sizing:border-box;padding:0 2px;border:1px solid rgba(128,128,128,.45);
+  border-radius:4px;font:inherit;text-align:center;background:transparent;color:inherit;-moz-appearance:textfield}
 #csw-native input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
-#csw-native .sw{position:relative;width:32px;height:18px;border-radius:999px;background:#8b8f98;border:0;padding:0;flex:none;
+#csw-native .sw{position:relative;width:32px;height:16px;border-radius:999px;background:#8b8f98;border:0;padding:0;flex:none;
   cursor:pointer;transition:background .15s}
-#csw-native .sw::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;
+#csw-native .sw::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#fff;
   transition:transform .15s}
-#csw-native .sw[aria-checked="true"]{background:#2f6fed}
-#csw-native .sw[data-k="red"][aria-checked="true"]{background:#e5484d}
-#csw-native .sw[data-k="auto"][aria-checked="true"]{background:#16a34a}
-#csw-native .sw[aria-checked="true"]::after{transform:translateX(14px)}
-#csw-native .f{display:flex;align-items:center;justify-content:space-between;gap:8px;opacity:.85;font-size:.92em}
-#csw-native .f .w{color:#d97706}
-#csw-native .f button{border:0;border-radius:999px;padding:3px 9px;background:rgba(128,128,128,.16);color:inherit;font:inherit;
-  font-weight:600;cursor:pointer;white-space:nowrap}
-#csw-native .f button:disabled{opacity:.45;cursor:default}
+#csw-native .sw[aria-checked="true"]{background:#00893C}
+#csw-native .sw[aria-checked="true"]::after{transform:translateX(16px)}
+#csw-native .r.u{cursor:default}
+#csw-native .r.u .t{opacity:.8}
+#csw-native .r.u button,#csw-native .mode{border:0;border-radius:999px;padding:3px 10px;font:inherit;font-weight:600;cursor:pointer;
+  white-space:nowrap;background:rgba(128,128,128,.16);color:inherit}
+#csw-native .r.u button:disabled{opacity:.45;cursor:default}
+#csw-native .mode{background:#8b8f98;color:#fff}
+#csw-native .mode[data-m="utama"]{background:#00893C}
+#csw-native .mode[data-m="cadangan"]{background:#d97706}
 .csw-ar{flex:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:16px;height:16px;
   margin:0 6px;border-radius:4px;border:2px solid #8b8f98;cursor:pointer;vertical-align:middle;
   font:700 11px/1 system-ui,sans-serif;color:#fff;background:transparent}
@@ -1439,12 +1573,7 @@ html[data-csw-dark] #csw-bar .csw-need.red{background:#e5484d;color:#fff}
 #csw-ar-nav .csw-ar-led{position:absolute;right:6px;bottom:6px;width:8px;height:8px;border-radius:50%;background:#8b8f98;
   box-shadow:0 0 0 2px #000}
 #csw-ar-nav button[data-ar="on"] .csw-ar-led{background:#16a34a}
-#csw-native .mode{border:0;border-radius:999px;padding:3px 10px;font:inherit;font-weight:600;cursor:pointer;white-space:nowrap;
-  background:#8b8f98;color:#fff}
-#csw-native .mode[data-m="utama"]{background:#16a34a}
-#csw-native .mode[data-m="cadangan"]{background:#d97706}
-[data-csw="red"]{box-shadow:inset 0 0 0 999px rgba(229,72,77,.06) !important;animation:cswBg 1.6s ease-in-out infinite}
-html[data-csw-dark] [data-csw="red"]{animation-name:cswBgD}
+[data-csw="red"]{box-shadow:inset 0 0 0 999px rgba(229,72,77,.06) !important}
 [data-csw-row="1"]{display:flex !important;align-items:center;min-width:0}
 [data-csw-row="1"] #csw-bar{flex-wrap:nowrap;flex:none}
 [data-csw-row="1"] > :not(#csw-bar){white-space:nowrap;flex:none}
@@ -1453,7 +1582,7 @@ html[data-csw-dark] [data-csw="red"]{animation-name:cswBgD}
 [data-csw-dot]::before{content:"";display:inline-block;width:12px;height:12px;min-width:12px;min-height:12px;flex:none;
   align-self:center;box-sizing:border-box;border-radius:50%;margin-right:6px;vertical-align:-1px;background-clip:padding-box;
   background-color:#2f6fed;border:2px solid rgba(47,111,237,.22)}
-[data-csw-dot="red"]::before{background-color:#e5484d;border-color:rgba(229,72,77,.3);animation:cswDot 1.6s infinite}
+[data-csw-dot="red"]::before{background-color:#e5484d;border-color:rgba(229,72,77,.5);will-change:opacity;animation:cswDot 1.6s infinite}
 html[data-csw-dark] [data-csw-dot="blue"]::before{background-color:#5c91ff;border-color:rgba(92,145,255,.3)}
 [data-csw][data-csw-t]::after{content:attr(data-csw-t);position:absolute;right:var(--csw-r,12px);top:50%;transform:translateY(-50%);
   z-index:3;pointer-events:none;white-space:nowrap;padding:2px 7px;border-radius:999px;
@@ -1463,15 +1592,14 @@ html[data-csw-dark] [data-csw][data-csw-t]::after{background:#24324d;color:#9dbd
 html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color:#fff}
 [data-csw-hide]{font-size:0 !important}
 [data-csw-flex="1"]{display:flex !important;flex-direction:column !important}
-@keyframes cswPulse{50%{box-shadow:0 0 0 4px rgba(229,72,77,.25)}}
-@keyframes cswDot{50%{border-color:rgba(229,72,77,.7)}}
-@keyframes cswBg{0%,100%{box-shadow:inset 0 0 0 999px rgba(229,72,77,.05)}50%{box-shadow:inset 0 0 0 999px rgba(229,72,77,.2)}}
-@keyframes cswBgD{0%,100%{box-shadow:inset 0 0 0 999px rgba(229,72,77,.1)}50%{box-shadow:inset 0 0 0 999px rgba(229,72,77,.3)}}
-@media (prefers-reduced-motion:reduce){#csw-bar .csw-need.red,[data-csw-dot="red"]::before,[data-csw="red"]{animation:none}}`;
+@keyframes cswPulse{50%{opacity:1}}
+@keyframes cswDot{50%{opacity:.55}}
+@media (prefers-reduced-motion:reduce){#csw-bar .csw-need.red::after,[data-csw-dot="red"]::before{animation:none}}`;
     (document.head || document.documentElement).appendChild(css);
 
     let bar = null, needBtn, nat = null;
     let busy = false, closeMiss = false, archN = 0;
+    // setelan masuk ke menu bawaan (ikon slider daftar chat): <li id=csw-native> sendiri di akhir ul[role=menu]
     function natHtml() {
       const sw = (k) => `<button type="button" role="switch" class="sw" data-k="${k}"></button>`;
       return '<div class="r" data-row="blue" title="Tandai biru semua chat yang belum dibalas"><span class="t">Belum dibalas</span>'
@@ -1483,8 +1611,8 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         + (SAPA ? '<div class="r" data-row="sapa" title="Utama = langsung sapa. Cadangan = sapa cuma kalau komputer Utama belum nyapa (±5 dtk). '
           + '1 akun di 2 komputer: pilih Utama di SATU komputer saja."><span class="t">Sapaan otomatis</span>'
           + '<button type="button" class="mode"></button></div>' : '')
-        + '<div class="f"><span class="n"></span><button type="button" data-act="clear">Clear</button></div>'
-        + '<div class="f" title="Update script tanpa refresh halaman"><span class="v"></span><button type="button" data-act="upd">Cek update</button></div>';
+        + '<div class="r u" title="Update script tanpa refresh halaman"><span class="t v"></span>'
+        + '<button type="button" data-act="upd">Cek update</button></div>';
     }
     function natFill() {
       if (!nat || !nat.isConnected) return;
@@ -1494,22 +1622,18 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
       }
       const i = nat.querySelector('input[data-k]');
       if (document.activeElement !== i && i.value !== String(cfg.redMin)) i.value = cfg.redMin;
-      const n = nat.querySelector('.n');
-      setText(n, closeMiss ? `${archN} closed gagal dibersihkan` : `${archN} closed chat`);
-      n.className = 'n' + (closeMiss ? ' w' : '');
-      nat.querySelector('[data-act=clear]').disabled = !archN || busy;
-      const ub = nat.querySelector('[data-act=upd]');
-      setText(nat.querySelector('.v'), env.updLabel());
-      setText(ub, env.updBtn());
-      ub.disabled = env.updBusy();
-      const bg = env.updAvail() ? '#7c3aed' : '';
-      if (ub.style.background !== bg) { ub.style.background = bg; ub.style.color = bg ? '#fff' : ''; }
       const mb = nat.querySelector('.mode');
       if (mb && SAPA) {
         const m = SAPA.getMode();
         setText(mb, { utama: '⚡ Utama', cadangan: 'Cadangan', off: 'Off' }[m] || m);
         if (mb.dataset.m !== m) mb.dataset.m = m;
       }
+      const ub = nat.querySelector('[data-act=upd]');
+      setText(nat.querySelector('.v'), env.updLabel());
+      setText(ub, env.updBtn());
+      ub.disabled = env.updBusy();
+      const bg = env.updAvail() ? '#7c3aed' : '';
+      if (ub.style.background !== bg) { ub.style.background = bg; ub.style.color = bg ? '#fff' : ''; }
     }
     function natSet(k, v) {
       cfg[k] = v;
@@ -1531,23 +1655,24 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
       const px = parseFloat(cs.paddingLeft) || parseFloat(getComputedStyle(g).paddingLeft) || 16;
       nat.style.setProperty('--csw-px', px + 'px');
       nat.style.font = getComputedStyle(g).font;
+      const gh = Math.round(g.getBoundingClientRect().height);        // tinggi baris = tombol bawaan
+      if (gh >= 24 && gh <= 64) nat.style.setProperty('--csw-h', gh + 'px');
       const stop = (e) => { e.stopPropagation(); };
       ['click', 'keydown', 'keyup', 'keypress', 'input'].forEach((t) => nat.addEventListener(t, stop));
       nat.addEventListener('click', (e) => {
-        const act = e.target.closest('[data-act=clear]');
-        if (act) { e.preventDefault(); if (!act.disabled) runClose(null, true); return; }
         const up = e.target.closest('[data-act=upd]');
         if (up) { e.preventDefault(); if (!up.disabled) { env.updClick(); natFill(); } return; }
         if (e.target.closest('input')) return;
         const r = e.target.closest('.r');
-        if (r && r.dataset.row === 'sapa') {
-          e.preventDefault();
+        if (!r || r.classList.contains('u')) return;
+        e.preventDefault();
+        if (r.dataset.row === 'sapa') {
           const urut = ['utama', 'cadangan', 'off'];
           SAPA.setMode(urut[(urut.indexOf(SAPA.getMode()) + 1) % urut.length]);
           natFill();
           return;
         }
-        if (r) { e.preventDefault(); const k = r.dataset.row; natSet(k, !cfg[k]); }
+        natSet(r.dataset.row, !cfg[r.dataset.row]);
       });
       nat.addEventListener('change', (e) => {
         const i = e.target;
@@ -1581,7 +1706,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
       const d = show ? '' : 'none';
       if (bar.style.display !== d) bar.style.display = d;
     }
-    function setText(el, v) { if (el.textContent !== v) el.textContent = v; }
+    function setText(el, v) { if (el && el.textContent !== v) el.textContent = v; }
     function updateBar(need, red, arch, ordered, dir) {
       archN = arch;
       const cls = 'csw-need' + (red ? ' red' : '');
@@ -1597,15 +1722,40 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
 
     // ---------- aksi ----------
     function openNext() {
-      const list = A.items().filter((it) => !it.archived && !it.replied && st[it.id] && st[it.id].w)
+      const list = A.items().filter((it) => it.mine !== false && !it.archived && !it.replied && st[it.id] && st[it.id].w)
         .sort((a, b) => st[a.id].w - st[b.id].w);
       if (!list.length) return;
       (list.find((x) => !x.open) || list[0]).clickEl.click();
     }
+    let orderOn = false;                 // urutan script sedang dipakai (scan terakhir)
+    // Alt+↑/↓: urutan layar dari hasil pindai terakhir; sesudah pindah, pemindai ditahan sebentar supaya aplikasi menggambar dulu
+    let lastItems = [], navAt = 0, holdUntil = 0;
+    const isOpen = (it) => location.pathname.includes('/' + it.id)
+      || (SITE === 'text' && (it.clickEl.getAttribute('aria-current') === 'page' || /message-list-item--active/.test(String(it.el.className))));
+    altNav = (e) => {
+      if (!e.altKey || e.ctrlKey || e.shiftKey || e.metaKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+      if (!orderOn) return;                // urutan asli -> shortcut bawaan saja
+      const live = lastItems.filter((it) => it.wrap.isConnected && it.wrap.style.display !== 'none');
+      if (!live.length) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const now = Date.now();
+      if (now - navAt < 120) return;        // tombol ditahan: maks 1 pindah / 120 ms
+      const dom = new Map(live.map((it, k) => [it, k]));
+      const ord = (it) => { const o = it.wrap.style.order; return o === '' ? dom.get(it) : +o; };
+      const list = live.slice().sort((a, b) => (a.wrap.parentElement === b.wrap.parentElement ? ord(a) - ord(b) : 0) || dom.get(a) - dom.get(b));
+      const i = list.findIndex(isOpen), up = e.key === 'ArrowUp';
+      const j = i < 0 ? (up ? list.length - 1 : 0) : i + (up ? -1 : 1);
+      if (j < 0 || j >= list.length || j === i) return;    // ujung daftar: diam (seperti bawaan)
+      navAt = now;
+      holdUntil = now + 600;
+      list[j].clickEl.click();
+      try { list[j].wrap.scrollIntoView({ block: 'nearest' }); } catch (x) { /* */ }
+    };
     const archSeen = new Map(), tried = new Map();
     async function runClose(ids, manual) {
       if (busy) return;
-      let cands = A.items().filter((it) => it.archived && ARCH_RE.test(it.text) && (manual || !it.open));
+      let cands = A.items().filter((it) => isDone(it) && (manual || !it.open));
       if (ids) cands = cands.filter((it) => ids.includes(it.id));
       if (!cands.length) return;
       if (manual && !window.confirm(`Tutup ${cands.length} chat yang sudah Archived dari daftar?`)) return;
@@ -1614,7 +1764,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
       try {
         const fresh = A.items();                              // baca ulang tepat sebelum menutup
         const sel = cands.map((c) => fresh.find((x) => x.id === c.id))
-          .filter((it) => it && it.archived && ARCH_RE.test(it.text) && (manual || !it.open));
+          .filter((it) => it && isDone(it) && (manual || !it.open));
         const now = Date.now();
         sel.forEach((it) => tried.set(it.id, now));
         if (A.closeMany) {                                    // Text: sekali buang dari memori daftar
@@ -1643,21 +1793,22 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     function autoTick(items, now) {
       if (!cfg.auto || busy) return;
       const retry = SITE === 'text' ? 60000 : 5000;
-      const due = items.filter((it) => it.archived && ARCH_RE.test(it.text) && !it.open
+      const due = items.filter((it) => it.mine !== false && isDone(it) && !it.open
         && now - (archSeen.get(it.id) || now) >= AUTO_JEDA && now - (tried.get(it.id) || 0) > retry)
         .map((it) => it.id);
       if (due.length) runClose(due, false);
     }
 
-    // ---------- penanda ----------
-    const marked = new Map();             // id -> [elemen bertanda] (dibersihkan kalau ganti / tidak perlu lagi)
+    // ---------- penanda (titik sebelum nama + chip timer di samping jam) ----------
+    const marked = new Map();                 // id -> [elemen bertanda] (dibersihkan kalau ganti / tidak perlu lagi)
+    const posSeen = new WeakSet();
     function mark(it, col, lab) {
       const els = [];
       if (col) {
         if (it.nameEl) { setAttr(it.nameEl, 'data-csw-dot', col); els.push(it.nameEl); }
-        const t = it.ageEl;
+        const t = it.ageEl;                // tanpa label jam (mouse di atas chat) -> tanpa chip, warna tetap
         if (t) {
-          if (!t.hasAttribute('data-csw-hide')) {
+          if (!t.hasAttribute('data-csw-hide')) {      // ukuran & posisi kanan = label jam bawaan (diukur sebelum disembunyikan)
             const fs = getComputedStyle(t).fontSize;
             if (parseFloat(fs) > 0) it.el.style.setProperty('--csw-fs', fs);
             const r = Math.round(it.el.getBoundingClientRect().right - t.getBoundingClientRect().right);
@@ -1665,7 +1816,10 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
             t.setAttribute('data-csw-hide', '1');
           }
           els.push(t);
-          if (getComputedStyle(it.el).position === 'static') it.el.style.position = 'relative';
+          if (!posSeen.has(it.el)) {         // dicek sekali per elemen (getComputedStyle tiap detik = berat)
+            posSeen.add(it.el);
+            if (getComputedStyle(it.el).position === 'static') it.el.style.position = 'relative';
+          }
         }
         setAttr(it.el, 'data-csw-t', t ? lab : '');
       } else setAttr(it.el, 'data-csw-t', '');
@@ -1680,42 +1834,20 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
       if (!m || (m[4] !== undefined && +m[4] < 0.5)) return null;
       return (0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3]) / 255;
     }
-    function isDark() {
+    const DK = { at: 0, v: false };
+    function isDark() {                   // warna latar dicek paling cepat tiap 10 dtk (class tema tetap langsung)
       const cl = document.body.className + ' ' + document.documentElement.className;
       if (/\blc-dark-theme\b/.test(cl)) return true;
       if (/\blc-light-theme\b/.test(cl)) return false;
+      if (Date.now() - DK.at < 10000) return DK.v;
+      DK.at = Date.now();
+      DK.v = false;
       for (let e = A.header() || A.orderBox() || document.body; e; e = e.parentElement) {
         const l = lum(getComputedStyle(e).backgroundColor);
-        if (l !== null) return l < 0.4;
+        if (l !== null) { DK.v = l < 0.4; break; }
       }
-      return false;
+      return DK.v;
     }
-
-    // ---------- 1.5.2: Alt+↑/↓ pindah chat ikut urutan yang KELIHATAN di layar ----------
-    // Cuma diambil alih kalau daftar lagi diurut ulang script; kalau ga, shortcut bawaan jalan seperti biasa.
-    altNav = (e) => {
-      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
-      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
-      const box = A.orderBox();
-      if (!box || box.getAttribute('data-csw-flex') !== '1') return;
-      const list = A.items()
-        .map((it) => ({ it, r: it.wrap.getBoundingClientRect() }))
-        .filter((x) => x.r.height > 0)
-        .sort((a, b) => a.r.top - b.r.top)
-        .map((x) => x.it);
-      if (!list.length) return;
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      if (e.repeat && Date.now() - (altNav.t || 0) < 120) return;   // tahan tombol: jangan kebut
-      altNav.t = Date.now();
-      const cur = list.findIndex((it) => it.open);
-      const step = e.key === 'ArrowDown' ? 1 : -1;
-      const next = cur < 0 ? (step > 0 ? 0 : list.length - 1) : cur + step;
-      if (next < 0 || next >= list.length) return;                  // sudah paling atas / bawah
-      const t = list[next];
-      t.clickEl.click();
-      try { t.wrap.scrollIntoView({ block: 'nearest' }); } catch (x) { /* */ }
-    };
 
     // ---------- 1.5.0: centang auto reply di samping nama chat (LiveChat) ----------
     function arBox(it) {
@@ -1773,9 +1905,9 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         const ageMs = it.age * 1000;
         let r = st[it.id];
         if (!r) r = st[it.id] = { e: now - ageMs, w: 0, s: now, t: 0 };
-        if (it.typing) {
+        if (it.typing) {                                   // member sedang mengetik: ikon & teks terakhir tertutup -> catatan
           if (r.tx) { it.text = r.tx; it.transfer = TRF_RE.test(r.tx); if (ARCH_RE.test(r.tx)) it.archived = true; }
-          it.replied = !!r.rp;
+          if (!it.fromStore) it.replied = !!r.rp;
         } else { r.tx = it.text; r.rp = it.replied ? 1 : 0; }
         if (it.transfer && !r.t) { r.e = now - ageMs; r.tr = 1; }   // jam transfer = jam masuk ke CS
         sapaTransfer(it);
@@ -1783,13 +1915,16 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         r.s = now;
         it.entry = r.e;
         it.trf = !!r.tr;
-        const needs = !it.archived && !it.replied;
+        const needs = it.mine !== false && !it.archived && !it.replied;   // di luar My chats -> tanpa tanda
         let col = '', lab = '';
         if (needs && it.typing) {
-          // member sedang mengetik: tanpa tanda, tidak masuk Waiting
+          // member lagi ngetik: tanpa tanda, tidak masuk Waiting, catatan timer tidak diubah
         } else if (needs) {
-          const tol = it.age < 60 ? 5 : 60;
-          if (!r.w || r.lt !== it.text || (it.ageEl && Math.abs((now - r.w) / 1000 - it.age) > tol)) r.w = now - ageMs;
+          // waktu tunggu = umur PESAN TERAKHIR. Pesan baru atau label ga cocok lagi dengan hitungan sendiri -> mulai dari label.
+          const win = ageWin(it.ageEl), cur = (now - r.w) / 1000;
+          const off = win && (cur < win.lo - 5 || cur > win.hi + win.slack);
+          if (it.lastTs) r.w = Math.min(now, it.lastTs);   // jam pesan terakhir persis dari memori aplikasi
+          else if (!r.w || r.lt !== it.text || off) r.w = now - ageMs;
           r.lt = it.text;
           const sec = (now - r.w) / 1000;
           col = cfg.red && sec >= cfg.redMin * 60 ? 'red' : cfg.blue ? 'blue' : '';
@@ -1800,7 +1935,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         setAttr(it.el, 'data-csw', col);
         mark(it, col, lab);
         if (!it.archived) arBox(it);
-        if (it.archived && ARCH_RE.test(it.text)) {
+        if (it.mine !== false && isDone(it)) {
           arch++;
           if (!archSeen.has(it.id)) archSeen.set(it.id, now);
         } else archSeen.delete(it.id);
@@ -1810,6 +1945,8 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
       let ordered = false;
       if (box && dir && items.length && A.canOrder(box, items)) { applyOrder(box, items, dir); ordered = true; }
       else clearOrder(box);
+      orderOn = ordered;
+      lastItems = items;
       ensureBar(listOn);
       if (listOn) updateBar(need, red, arch, ordered, dir);
       save(now);
@@ -1817,15 +1954,21 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     }
 
     let tmr = 0;
-    function schedule() { if (!tmr) tmr = setTimeout(() => { tmr = 0; try { scan(); } catch (e) { console.error('[CS Inbox]', e); } }, 300); }
+    function schedule() {
+      if (tmr) return;
+      const wait = Math.max(300, holdUntil - Date.now());   // sesudah Alt + ↑/↓ tunggu aplikasi selesai menggambar
+      tmr = setTimeout(() => { tmr = 0; try { scan(); } catch (e) { console.error('[CS Inbox]', e); } }, wait);
+    }
     let natRaf = 0;
+    const listRoot = () => (SITE === 'text' ? TX.root() : document.getElementById('chats-list-column'));
     const mo = new MutationObserver((muts) => {
       for (const m of muts) {
         if (bar && (m.target === bar || bar.contains(m.target))) continue;
         if (nat && (m.target === nat || nat.contains(m.target))) continue;
-        if (!natRaf) natRaf = requestAnimationFrame(() => { natRaf = 0; try { natInject(); } catch (e) { console.error('[CS Inbox]', e); } });
-        schedule();
-        return;
+        if (!natRaf && !(nat && nat.isConnected)) natRaf = requestAnimationFrame(() => { natRaf = 0; try { natInject(); } catch (e) { console.error('[CS Inbox]', e); } });
+        // pindai hanya kalau perubahan ada di daftar chat (panel pesan, mengetik, dll. tidak); lainnya cukup tiap 1 dtk
+        const lr = listRoot();
+        if (!lr || lr.contains(m.target)) { schedule(); return; }
       }
     });
     mo.observe(document.body, { childList: true, subtree: true, characterData: true });
