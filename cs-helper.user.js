@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      1.7.0
+// @version      1.7.1
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
