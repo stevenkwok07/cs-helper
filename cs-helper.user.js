@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      1.7.2
+// @version      1.7.3
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -1125,6 +1125,8 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
 
     // ===================== PENGATURAN =====================
     const AUTO_JEDA = 800;     // auto-tutup: tunggu sebentar sesudah chat jadi Archived (ms)
+    const AUTO_BUKA = true;    // 1.7.3: chat Archived yang LAGI DIBUKA juga ikut di-clear (false = dibiarin)
+    const AUTO_JEDA_BUKA = 3000; // 1.7.3: jeda buat chat yang lagi dibuka (ms), biar sempat kebaca
     const SIMPAN_JAM = 24;     // catatan jam masuk per chat disimpan 24 jam
     const SAPA_DOM_MAX = 120;  // 1.4.0: "Transferred - by" di daftar disapa kalau umurnya <= ini (detik)
     const DEBUG = false;
@@ -1606,7 +1608,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         + sw('blue') + '</div>'
         + '<div class="r" data-row="red" title="Tandai merah kalau belum dibalas lebih dari n menit"><span class="t">Merah &gt;'
         + '<input type="number" min="1" max="120" step="1" data-k="redMin">mnt</span>' + sw('red') + '</div>'
-        + '<div class="r" data-row="auto" title="Otomatis bersihkan chat closed / Archived (kecuali yang sedang dibuka)">'
+        + '<div class="r" data-row="auto" title="Otomatis bersihkan chat closed / Archived (termasuk yang lagi dibuka, jeda 3 dtk)">'
         + '<span class="t">Auto clear closed</span>' + sw('auto') + '</div>'
         + (SAPA ? '<div class="r" data-row="sapa" title="Utama = langsung sapa. Cadangan = sapa cuma kalau komputer Utama belum nyapa (±5 dtk). '
           + '1 akun di 2 komputer: pilih Utama di SATU komputer saja."><span class="t">Sapaan otomatis</span>'
@@ -1755,7 +1757,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     const archSeen = new Map(), tried = new Map();
     async function runClose(ids, manual) {
       if (busy) return;
-      let cands = A.items().filter((it) => isDone(it) && (manual || !it.open));
+      let cands = A.items().filter((it) => isDone(it) && (manual || AUTO_BUKA || !it.open));
       if (ids) cands = cands.filter((it) => ids.includes(it.id));
       if (!cands.length) return;
       if (manual && !window.confirm(`Tutup ${cands.length} chat yang sudah Archived dari daftar?`)) return;
@@ -1764,7 +1766,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
       try {
         const fresh = A.items();                              // baca ulang tepat sebelum menutup
         const sel = cands.map((c) => fresh.find((x) => x.id === c.id))
-          .filter((it) => it && isDone(it) && (manual || !it.open));
+          .filter((it) => it && isDone(it) && (manual || AUTO_BUKA || !it.open));
         const now = Date.now();
         sel.forEach((it) => tried.set(it.id, now));
         if (A.closeMany) {                                    // Text: sekali buang dari memori daftar
@@ -1793,8 +1795,8 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     function autoTick(items, now) {
       if (!cfg.auto || busy) return;
       const retry = SITE === 'text' ? 60000 : 5000;
-      const due = items.filter((it) => it.mine !== false && isDone(it) && !it.open
-        && now - (archSeen.get(it.id) || now) >= AUTO_JEDA && now - (tried.get(it.id) || 0) > retry)
+      const due = items.filter((it) => it.mine !== false && isDone(it) && (AUTO_BUKA || !it.open)
+        && now - (archSeen.get(it.id) || now) >= (it.open ? AUTO_JEDA_BUKA : AUTO_JEDA) && now - (tried.get(it.id) || 0) > retry)
         .map((it) => it.id);
       if (due.length) runClose(due, false);
     }
@@ -1935,6 +1937,8 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         setAttr(it.el, 'data-csw', col);
         mark(it, col, lab);
         if (!it.archived) arBox(it);
+        else if (it.nameEl && it.nameEl.nextElementSibling && it.nameEl.nextElementSibling.classList.contains('csw-ar'))
+          it.nameEl.nextElementSibling.remove();   // 1.7.3: chat udah Archived -> centang auto reply dibuang
         if (it.mine !== false && isDone(it)) {
           arch++;
           if (!archSeen.has(it.id)) archSeen.set(it.id, now);
