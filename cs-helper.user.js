@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.4.0
+// @version      2.4.1
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -1509,11 +1509,13 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       if (!r.found) return { html: '<span style="color:#aaa">❓ tidak ada withdraw</span>', title: '' };
       const s = r.status || '-';
       const title = [r.debit && 'Debit: ' + r.debit, r.date && 'Tgl: ' + r.date, r.by && 'Oleh: ' + r.by, r.note && 'Note: ' + r.note].filter(Boolean).join('\n');
-      if (/reject|tolak|cancel|decline|fail|gagal/i.test(s))
-        return { html: `<span style="color:#ff6b6b">❌ ${escH(s)}</span>` + (r.note ? `<span style="color:#ffb3b3"> · ${escH(r.note)}</span>` : ''), title };
-      if (/pending|double\s*confirm|process|wait|proses/i.test(s)) return { html: `<span style="color:#fbbf24">⏳ ${escH(s)}</span>`, title };
-      if (/success|sukses|berhasil|approve|complete|done|confirm/i.test(s)) return { html: `<span style="color:#4ade80">✅ ${escH(s)}</span>`, title };
-      return { html: `<span style="color:#ddd">${escH(s)}</span>`, title };
+      // 2.4.1: note dari panel selalu ikut tampil kalau ada (status apa pun); "-" dianggap kosong
+      const note = String(r.note || '').trim();
+      const withNote = (html, col) => html + (note && note !== '-' ? `<span style="color:${col}"> · ${escH(note)}</span>` : '');
+      if (/reject|tolak|cancel|decline|fail|gagal/i.test(s)) return { html: withNote(`<span style="color:#ff6b6b">❌ ${escH(s)}</span>`, '#ffb3b3'), title };
+      if (/pending|double\s*confirm|process|wait|proses/i.test(s)) return { html: withNote(`<span style="color:#fbbf24">⏳ ${escH(s)}</span>`, '#fde68a'), title };
+      if (/success|sukses|berhasil|approve|complete|done|confirm/i.test(s)) return { html: withNote(`<span style="color:#4ade80">✅ ${escH(s)}</span>`, '#bbf7d0'), title };
+      return { html: withNote(`<span style="color:#ddd">${escH(s)}</span>`, '#ddd'), title };
     }
     let cekEl = null, cekChat = '';
     function cekShow(chatId, html, title = '') {
