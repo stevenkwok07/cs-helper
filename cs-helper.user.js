@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.0.0
-// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil tanpa bridge). + Tombol Update tanpa refresh.
+// @version      2.1.0
+// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil / Tanpa tab). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
 // @match        https://text.com/app/*
@@ -18,6 +18,7 @@
 // @connect      raw.githubusercontent.com
 // @connect      gist.githubusercontent.com
 // @connect      127.0.0.1
+// @connect      *
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/stevenkwok07/cs-helper/main/cs-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/stevenkwok07/cs-helper/main/cs-helper.user.js
@@ -1117,10 +1118,45 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
 
   // #####################################################################
   // 2.0.0 JALUR CEK WD: "bridge" = lewat bridge.py (LiveChat & panel UG beda profil/komputer)
+  //                     "langsung" (2.1.0, "Tanpa tab") = LiveChat nanya panel UG di belakang layar
   //                     "profil" = LiveChat & panel UG di profil Chrome yang SAMA, tanpa bridge
   //                               (ngobrol lewat penyimpanan Tampermonkey script ini)
   // Dipilih per browser lewat menu ikon slider daftar chat: "Jalur cek WD".
   // #####################################################################
+  // ---------- tabel transaksi panel UG (dipakai jalur "1 Profil" & "Tanpa tab") ----------
+  // kolom diambil berdasarkan judul header tabel, jadi urutan kolom tidak masalah
+  const COLS = {
+    username: /user\s*name/i,
+    status: /^status/i,
+    by: /confirm|reject|approve|process|by/i,
+    note: /note|remark|keterangan/i,
+    debit: /^debit/i,
+    date: /transaction\s*date/i,
+  };
+  // aturan balasan otomatis berdasarkan withdraw terbaru; yang pertama cocok dipakai
+  const RULES = [
+    { key: 'dc', test: r => /double\s*confirm/i.test(r.status) },
+    { key: 'wal', test: r => /gangguan\s*wd|metode\s*bank\s*atau\s*e-?wallet\s*lain/i.test(r.note) },
+  ];
+  const cellTxt = (c) => ((c && (c.innerText || c.textContent)) || '').trim();
+  function scrapeRows(root, user) {
+    for (const t of root.querySelectorAll('table')) {
+      const heads = [...t.querySelectorAll('thead th')].map(cellTxt);
+      const idx = {};
+      for (const k in COLS) idx[k] = heads.findIndex(h => COLS[k].test(h));
+      if (idx.username < 0 || idx.status < 0) continue;
+      return [...t.querySelectorAll('tbody tr')]
+        .filter(tr => tr.cells.length > 1 && cellTxt(tr.cells[idx.username]).toLowerCase() === user.toLowerCase())
+        .map(tr => {
+          const get = k => idx[k] >= 0 ? cellTxt(tr.cells[idx[k]]) : '';
+          return { status: get('status'), by: get('by'), note: get('note'), debit: get('debit'), date: get('date').replace(/^Game Wallet\s*/i, '').slice(0, 19) };
+        });
+    }
+    return null; // tabel belum ada
+  }
+  // withdraw = baris dengan Debit bukan 0; tabel urut terbaru di atas, jadi ambil yang pertama
+  const latestWD = rows => (rows || []).filter(r => r.debit && !/^0(\.0+)?$/.test(r.debit.replace(/,/g, ''))).slice(0, 1);
+
   const WDQ = (() => {
     const BR = 'http://127.0.0.1:8765';
     const P = 'wdq|', R = 'wdres|', UMUR = 5 * 60000;   // antrean lebih tua dari 5 menit dibuang
@@ -1131,6 +1167,45 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
       onload: (r) => { try { res(JSON.parse(r.responseText) || {}); } catch (e) { res({}); } },
       onerror: () => rej(new Error('bridge mati? jalankan bridge.py')), ontimeout: () => rej(new Error('bridge timeout')),
     }));
+    // ---------- 2.1.0 jalur "langsung" (Tanpa tab): tanya panel UG di belakang layar ----------
+    // pakai sesi login panel UG di Chrome ini; tab panel ga perlu kebuka. Alamat panel kecatat otomatis
+    // waktu halaman transaction panel UG pernah dibuka sekali di profil ini.
+    let tok = '';
+    const gt = (method, url, data) => new Promise((res, rej) => GM_xmlhttpRequest({
+      method, url, data, timeout: 15000,
+      headers: data ? { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' } : {},
+      onload: res, onerror: () => rej(new Error('panel UG ga bisa dihubungi')), ontimeout: () => rej(new Error('panel UG timeout')),
+    }));
+    const parse = (html) => new DOMParser().parseFromString(html || '', 'text/html');
+    async function token(base) {
+      const d = parse((await gt('GET', base + '/transaction')).responseText);
+      const t = d.querySelector('input[name="_token"]');
+      if (!t || !d.getElementById('lahanat_member')) throw new Error('panel UG belum login (login dulu di Chrome ini)');
+      return (tok = t.value);
+    }
+    const pad = (n) => String(n).padStart(2, '0');
+    const ymd = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    // isi persis kayak form Search panel (rentang default panel: kemarin 00:00 - hari ini 23:59)
+    async function cari(base, user, recordType) {
+      for (let i = 0; i < 2; i++) {
+        if (!tok || i) await token(base);
+        const now = new Date(), kmrn = new Date(Date.now() - 86400000);
+        const body = new URLSearchParams([['promo_data', '1'], ['show_subsidi', '0'], ['_token', tok],
+          ['daterange', ymd(kmrn) + '  00:00:00 - ' + ymd(now) + '  23:59:59'], ['_token', tok], ['recordType', recordType],
+          ['all', '0'], ['form_option', 'user_name'], ['agent_id', ''], ['user_name', user], ['acc_name', ''], ['acc_num', ''],
+          ['transaction_id', ''], ['ref_id', ''], ['ref_no', ''], ['status', 'all'], ['approved_user', ''], ['show_promotion', 'on']]);
+        const rows = scrapeRows(parse((await gt('POST', base + '/transaction_ajax', body.toString())).responseText), user);
+        if (rows) return rows;   // tabel ga ada -> token basi / sesi habis: ambil token baru, coba sekali lagi
+      }
+      throw new Error('panel UG ga ngasih tabel (sesi habis? login ulang di panel)');
+    }
+    async function lookup(user) {
+      const base = GM_getValue('wdPanelUrl', '');
+      if (!base) throw new Error('buka halaman transaction panel UG sekali di Chrome ini biar alamatnya kecatat');
+      let wd = latestWD(await cari(base, user, '1'));            // 1 = Debit (cuma withdraw)
+      if (!wd.length) wd = latestWD(await cari(base, user, '')); // jaga-jaga: semua transaksi, cara lama
+      return Object.assign({ user, found: !!wd[0], ts: Date.now() }, wd[0] || {});
+    }
     const keys = (q) => GM_listValues().filter((k) => k.startsWith(P + q + '|')).sort();
     return {
       jalur,
@@ -1161,6 +1236,7 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
         if (jalur() === 'bridge') return gx('GET', BR + '/result?user=' + encodeURIComponent(user));
         return GM_getValue(R + user.toLowerCase(), {}) || {};
       },
+      lookup,
     };
   })();
 
@@ -1325,8 +1401,24 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       const k = user.toLowerCase();
       if (Date.now() - (lastPush.get(k) || 0) < 60000) return;
       lastPush.set(k, Date.now());
+      if (WDQ.jalur() === 'langsung') {
+        log('cek ' + user + ' (' + why + ', tanpa tab)');
+        viaLangsung(user, userChat.get(k))
+          .then((r) => log(user + ': ' + (r.found ? r.status + (r.note ? ' · ' + r.note : '') : 'tidak ada withdraw')))
+          .catch((e) => { lastPush.delete(k); log('⚠️ ' + e.message); });
+        return;
+      }
       WDQ.push('', user).catch((e) => { lastPush.delete(k); log(e.message); });
       log('cek ' + user + ' (' + why + ')');
+    }
+
+    // 2.1.0 jalur "Tanpa tab": cari langsung ke panel, tampilkan di samping Cek WD, jalankan aturan #dc / #wal
+    async function viaLangsung(user, chatId) {
+      const r = await WDQ.lookup(user);
+      if (chatId) { const l = wdLabel(r); set(chatId, l.html, l.title); }
+      const rule = r.found && RULES.find((x) => x.test(r));
+      if (rule) sendReply(user, rule.key);
+      return r;
     }
 
     // ---------- balas #dc / #wal ----------
@@ -1419,6 +1511,12 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
         if (!user) return set(chatId, '<span style="color:#ff6b6b">username tidak ketemu</span>');
         userChat.set(user.toLowerCase(), chatId);
         lastPush.set(user.toLowerCase(), Date.now());   // biar deteksi otomatis ga ngirim dobel
+        if (WDQ.jalur() === 'langsung') {
+          set(chatId, `<span style="color:#aaa">⏳ cek ${escH(user)} di panel...</span>`);
+          log('Cek WD ' + user + ' (tombol, tanpa tab)');
+          await viaLangsung(user, chatId);
+          return;
+        }
         const t0 = Date.now() - 2000;
         await WDQ.push('', user);
         set(chatId, `<span style="color:#aaa">⏳ cek ${escH(user)} di panel...</span>`);
@@ -1441,26 +1539,14 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
   const WDX = SITE === 'lc' ? initWD() : null;
 
   // #####################################################################
-  // BAGIAN E: PANEL UG (halaman transaction) - 2.0.0, cuma jalan kalau Jalur cek WD = "1 Profil"
+  // BAGIAN E: PANEL UG (halaman transaction) - 2.0.0, cuma nyari kalau Jalur cek WD = "1 Profil"
+  // (2.1.0: di jalur mana pun alamat panelnya dicatat, dipakai jalur "Tanpa tab")
   // Sama kayak script "Panel UG -> auto search username withdraw", tapi antreannya lewat script ini (tanpa bridge).
   // Jalur "Bridge": bagian ini diam, pakai script Panel UG yang lama + bridge.py.
   // #####################################################################
   function initPanelUG() {
-    // kolom diambil berdasarkan judul header tabel, jadi urutan kolom tidak masalah
-    const COLS = {
-      username: /user\s*name/i,
-      status: /^status/i,
-      by: /confirm|reject|approve|process|by/i,
-      note: /note|remark|keterangan/i,
-      debit: /^debit/i,
-      date: /transaction\s*date/i,
-    };
+    GM_setValue('wdPanelUrl', location.origin);   // 2.1.0: alamat panel buat jalur "Tanpa tab"
     const MAX = 30; // jumlah hasil yang disimpan di box
-    // aturan balasan otomatis berdasarkan withdraw terbaru; yang pertama cocok dipakai
-    const RULES = [
-      { key: 'dc', test: r => /double\s*confirm/i.test(r.status) },
-      { key: 'wal', test: r => /gangguan\s*wd|metode\s*bank\s*atau\s*e-?wallet\s*lain/i.test(r.note) },
-    ];
     const aktif = () => WDQ.jalur() === 'profil';
 
     // timer lewat Worker: Chrome tidak memperlambatnya walau tab panel di belakang / di-minimize
@@ -1505,25 +1591,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
     }
     render();
 
-    // ---------- ambil isi tabel hasil ----------
-    function scrape(user) {
-      for (const t of document.querySelectorAll('table')) {
-        const heads = [...t.querySelectorAll('thead th')].map(h => h.innerText.trim());
-        const idx = {};
-        for (const k in COLS) idx[k] = heads.findIndex(h => COLS[k].test(h));
-        if (idx.username < 0 || idx.status < 0) continue;
-        return [...t.querySelectorAll('tbody tr')]
-          .filter(tr => tr.cells.length > 1 && (tr.cells[idx.username]?.innerText || '').trim().toLowerCase() === user.toLowerCase())
-          .map(tr => {
-            const get = k => idx[k] >= 0 ? (tr.cells[idx[k]]?.innerText || '').trim() : '';
-            return { status: get('status'), by: get('by'), note: get('note'), debit: get('debit'), date: get('date').replace(/^Game Wallet\s*/i, '').slice(0, 19) };
-          });
-      }
-      return null; // tabel belum ada
-    }
-
-    // withdraw = baris dengan Debit bukan 0; tabel urut terbaru di atas, jadi ambil yang pertama
-    const latestWD = rows => rows.filter(r => r.debit && !/^0(\.0+)?$/.test(r.debit.replace(/,/g, ''))).slice(0, 1);
+    const scrape = (user) => scrapeRows(document, user);
 
     function save(user, rows) {
       const list = GM_getValue('wdp_hist', []).filter(r => r.user !== user);
@@ -2040,6 +2108,7 @@ html[data-csw-dark] #csw-bar .csw-need.red{background:#e5484d;color:#fff}
 #csw-native .mode[data-m="utama"]{background:#00893C}
 #csw-native .mode[data-m="cadangan"]{background:#d97706}
 #csw-native .mode[data-m="profil"]{background:#2f6fed}
+#csw-native .mode[data-m="langsung"]{background:#16a34a}
 .csw-ar{flex:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:16px;height:16px;
   margin:0 6px;border-radius:4px;border:2px solid #8b8f98;cursor:pointer;vertical-align:middle;
   font:700 11px/1 system-ui,sans-serif;color:#fff;background:transparent}
@@ -2090,7 +2159,8 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
           + '1 akun di 2 komputer: pilih Utama di SATU komputer saja."><span class="t">Sapaan otomatis</span>'
           + '<button type="button" class="mode"></button></div>' : '')
         + (SITE === 'lc' ? '<div class="r" data-row="jalur" title="Bridge = pakai bridge.py (panel UG di profil / komputer lain). '
-          + '1 Profil = panel UG kebuka di profil Chrome yang sama, tanpa bridge."><span class="t">Jalur cek WD</span>'
+          + '1 Profil = tab panel UG kebuka di profil Chrome yang sama. '
+          + 'Tanpa tab = langsung tanya panel UG di belakang layar (cukup login panel di Chrome ini)."><span class="t">Jalur cek WD</span>'
           + '<button type="button" class="mode jalur"></button></div>' : '')
         + '<div class="r u" title="Update script tanpa refresh halaman"><span class="t v"></span>'
         + '<button type="button" data-act="upd">Cek update</button></div>';
@@ -2112,7 +2182,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
       const jb = nat.querySelector('.jalur');
       if (jb) {
         const j = WDQ.jalur();
-        setText(jb, j === 'profil' ? '1 Profil' : 'Bridge');
+        setText(jb, { profil: '1 Profil', langsung: 'Tanpa tab' }[j] || 'Bridge');
         if (jb.dataset.m !== j) jb.dataset.m = j;
       }
       const ub = nat.querySelector('[data-act=upd]');
@@ -2154,7 +2224,8 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         if (!r || r.classList.contains('u')) return;
         e.preventDefault();
         if (r.dataset.row === 'jalur') {
-          WDQ.setJalur(WDQ.jalur() === 'profil' ? 'bridge' : 'profil');
+          const urut = ['bridge', 'profil', 'langsung'];
+          WDQ.setJalur(urut[(urut.indexOf(WDQ.jalur()) + 1) % urut.length]);
           natFill();
           return;
         }
