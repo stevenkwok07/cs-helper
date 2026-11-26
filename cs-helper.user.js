@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.5.2
+// @version      2.5.3
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -1705,7 +1705,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
 
     // ---------- 2.5.0: tombol Cek TO ----------
     // Jalur Bridge -> antre ke worker (/push/to), tunggu hasil (/result?kind=to). Jalur lain -> tanya panel langsung.
-    // 2.5.2: klik Cek TO -> gambar kotak TO langsung ke-copy (ga ditampilin), di samping tombol cuma teks promo.
+    // 2.5.3: klik Cek TO -> di samping tombol muncul tombol "📋 Copy gambar" (gambar ga ditampilin) + teks promo.
     const fmtN = n => Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const promoName = p => p.bonus || p.amount || p.jenis;
     const promoLine = r => {
@@ -1780,11 +1780,13 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       return r;
     }
 
+    // 2.5.3: hasil = tombol "📋 Copy gambar" (gambar ga ditampilin) + teks promo
     function showTOres(chatId, r, copied) {
       const col = (r.promos || []).length ? '#fbbf24' : '#4ade80';
-      const cp = copied ? '<span style="color:#4ade80">📋 TO ke-copy</span>'
-        : '<a href="#" data-a="recopy" style="color:#c4a5ff" title="Copy gambar TO">📋 copy gambar</a>';
-      set(chatId, `${cp} <span style="color:${col}">· ${escH(promoLine(r))}</span>`, toText(r));
+      const btn = `<button type="button" data-a="recopy" title="Copy gambar kotak TO (tinggal Ctrl+V)" style="border:0;border-radius:999px;`
+        + `padding:3px 10px;cursor:pointer;font:inherit;color:#fff;background:${copied ? '#16a34a' : '#3a3f4b'}">`
+        + (copied ? '✅ Ke-copy' : '📋 Copy gambar') + '</button>';
+      set(chatId, `${btn} <span style="color:${col}">${escH(promoLine(r))}</span>`, toText(r));
     }
 
     let toBusy = false;
@@ -1794,26 +1796,23 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       if (!sock) return set(chatId, '<span style="color:#ff6b6b">koneksi LiveChat belum siap</span>');
       toBusy = true;
       set(chatId, '<span style="color:#aaa">⏳ cek TO...</span>');
-      const job = getTO(chatId);
-      const copyP = copyImg(job.then(toBlob));
-      copyP.catch(() => {});
-      job.then(async (r) => {
-        let ok = true;
-        try { await copyP; } catch (e) { ok = false; log('copy gambar TO gagal: ' + e.message); }
+      getTO(chatId).then((r) => {
         lastTO.set(chatId, r);
-        showTOres(chatId, r, ok);
-        log(r.user + ': sisa TO ' + fmtN(r.sisa) + ' · ' + promoLine(r) + (ok ? ' (gambar ke-copy)' : ''));
+        showTOres(chatId, r, false);
+        log(r.user + ': sisa TO ' + fmtN(r.sisa) + ' · ' + promoLine(r));
       }).catch((e) => {
         set(chatId, `<span style="color:#ff6b6b">⚠️ TO: ${escH(e.message)}</span>`);
         log('⚠️ Cek TO: ' + e.message);
       }).finally(() => { toBusy = false; });
     }
-    // klik "📋 copy gambar" (kalau copy otomatis tadi gagal, mis. jendela Chrome lagi ga fokus)
+    // klik "📋 Copy gambar" -> gambar kotak TO masuk clipboard
     function recopyTO() {
       const chatId = chatIdNow(), r = lastTO.get(chatId);
       if (!r) return;
-      copyImg(toBlob(r)).then(() => showTOres(chatId, r, true))
-        .catch((e) => set(chatId, `<span style="color:#ff6b6b">⚠️ gagal copy: ${escH(e.message)}</span>`));
+      copyImg(toBlob(r)).then(() => {
+        showTOres(chatId, r, true);
+        setTimeout(() => { if (lastTO.get(chatId) === r) showTOres(chatId, r, false); }, 2500);
+      }).catch((e) => set(chatId, `<span style="color:#ff6b6b">⚠️ gagal copy: ${escH(e.message)}</span>`));
     }
 
     // habis update tanpa refresh -> langsung numpang koneksi LiveChat yang udah kebuka
