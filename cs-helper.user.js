@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      1.9.0
-// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat. + Tombol Update tanpa refresh.
+// @version      2.0.0
+// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil tanpa bridge). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
 // @match        https://text.com/app/*
+// @match        https://*/transaction*
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_listValues
+// @grant        GM_deleteValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
@@ -40,7 +43,8 @@
   // #####################################################################
   function APP(env) {
   const PW = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;   // window asli halaman
-  const SITE = /(^|\.)text\.com$/i.test(location.hostname) ? 'text' : 'lc';
+  // 2.0.0: 'ug' = panel UG (halaman transaction), cuma dipakai jalur WD "1 Profil"
+  const SITE = /(^|\.)text\.com$/i.test(location.hostname) ? 'text' : /(^|\.)livechatinc\.com$/i.test(location.hostname) ? 'lc' : 'ug';
 
   // 1.7.0: semua yang dipasang script dicatat di sini, biar pas update bisa dicopot bersih (ga dobel)
   let stopped = false;
@@ -1112,6 +1116,55 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
   const AR = SITE === 'lc' ? initAutoReply() : null;
 
   // #####################################################################
+  // 2.0.0 JALUR CEK WD: "bridge" = lewat bridge.py (LiveChat & panel UG beda profil/komputer)
+  //                     "profil" = LiveChat & panel UG di profil Chrome yang SAMA, tanpa bridge
+  //                               (ngobrol lewat penyimpanan Tampermonkey script ini)
+  // Dipilih per browser lewat menu ikon slider daftar chat: "Jalur cek WD".
+  // #####################################################################
+  const WDQ = (() => {
+    const BR = 'http://127.0.0.1:8765';
+    const P = 'wdq|', R = 'wdres|', UMUR = 5 * 60000;   // antrean lebih tua dari 5 menit dibuang
+    const jalur = () => GM_getValue('wdJalur', 'bridge');
+    const gx = (method, url, body) => new Promise((res, rej) => GM_xmlhttpRequest({
+      method, url, timeout: 5000, headers: { 'Content-Type': 'application/json' },
+      data: body ? JSON.stringify(body) : undefined,
+      onload: (r) => { try { res(JSON.parse(r.responseText) || {}); } catch (e) { res({}); } },
+      onerror: () => rej(new Error('bridge mati? jalankan bridge.py')), ontimeout: () => rej(new Error('bridge timeout')),
+    }));
+    const keys = (q) => GM_listValues().filter((k) => k.startsWith(P + q + '|')).sort();
+    return {
+      jalur,
+      setJalur: (v) => GM_setValue('wdJalur', v),
+      // q: '' = antrean cari di panel, 'dc' / 'wal' = antrean balasan
+      async push(q, user) {
+        if (jalur() === 'bridge') return gx('POST', BR + '/push' + (q ? '/' + q : ''), { user });
+        // tiap item 1 key sendiri, biar tab LiveChat & tab panel ga saling timpa
+        if (keys(q).some((k) => GM_getValue(k, '') === user)) return;
+        GM_setValue(P + q + '|' + Date.now() + '|' + Math.random().toString(36).slice(2, 6), user);
+      },
+      async pull(q) {
+        if (jalur() === 'bridge') return (await gx('GET', BR + '/pull' + (q ? '/' + q : ''))).user || '';
+        for (const k of keys(q)) {
+          const u = GM_getValue(k, '');
+          GM_deleteValue(k);
+          if (u && Date.now() - (+k.split('|')[2] || 0) < UMUR) return u;
+        }
+        return '';
+      },
+      async setResult(user, r) {
+        if (jalur() === 'bridge') return gx('POST', BR + '/result', Object.assign({ user }, r));
+        const now = Date.now();
+        for (const k of GM_listValues()) if (k.startsWith(R) && now - ((GM_getValue(k, {}) || {}).ts || 0) > 6 * 3600000) GM_deleteValue(k);
+        GM_setValue(R + user.toLowerCase(), Object.assign({ user }, r, { ts: now }));
+      },
+      async result(user) {
+        if (jalur() === 'bridge') return gx('GET', BR + '/result?user=' + encodeURIComponent(user));
+        return GM_getValue(R + user.toLowerCase(), {}) || {};
+      },
+    };
+  })();
+
+  // #####################################################################
   // BAGIAN D: CEK WITHDRAW + AUTO BALAS #dc / #wal (hanya LiveChat)  - 1.8.0
   // - pesan customer berisi wd/withdraw di chat MANA PUN -> username dikirim ke panel (bridge.py)
   // - panel taruh username di antrean /pull/dc atau /pull/wal -> teksnya dikirim ke chat itu
@@ -1120,7 +1173,6 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
   function initWD() {
     const W = PW;
     const WD_AKTIF = true;
-    const BRIDGE = 'http://127.0.0.1:8765';
     // withdraw + salah ketik (widraw, witdraw, withdrw), wd/wdnya/wd2, tarik/penarikan
     const WD = /\bwd|w\w{0,3}dr\w?w|\btarik|penarikan/i;
     const ONLY_MINE = true; // cuma chat yang lagi dipegang akun lo
@@ -1273,11 +1325,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       const k = user.toLowerCase();
       if (Date.now() - (lastPush.get(k) || 0) < 60000) return;
       lastPush.set(k, Date.now());
-      GM_xmlhttpRequest({
-        method: 'POST', url: BRIDGE + '/push',
-        headers: { 'Content-Type': 'application/json' }, data: JSON.stringify({ user }),
-        onerror: () => { lastPush.delete(k); log('bridge mati? jalankan bridge.py'); },
-      });
+      WDQ.push('', user).catch((e) => { lastPush.delete(k); log(e.message); });
       log('cek ' + user + ' (' + why + ')');
     }
 
@@ -1306,13 +1354,11 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
 
     // ambil antrean balasan dari panel (satu antrean per kunci: /pull/dc, /pull/wal)
     // cuma tab pengirim yang ngambil, biar antrean ga "dimakan" tab lain
-    setInterval(() => {
+    setInterval(async () => {
       if (!sock || !leader()) return;
-      for (const key of Object.keys(REPLIES))
-        GM_xmlhttpRequest({
-          method: 'GET', url: BRIDGE + '/pull/' + key,
-          onload: r => { if (stopped) return; try { const { user } = JSON.parse(r.responseText); if (user) sendReply(user, key); } catch (e) {} },
-        });
+      for (const key of Object.keys(REPLIES)) {
+        try { const user = await WDQ.pull(key); if (user && !stopped) sendReply(user, key); } catch (e) { /* bridge mati */ }
+      }
     }, 2000);
 
     // ---------- 1.9.0: tombol Cek WD di header chat (samping nama customer) ----------
@@ -1361,11 +1407,6 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       if (h) { h.style.removeProperty('width'); h.style.removeProperty('flex'); }
     });
 
-    const getJSON = url => new Promise((res, rej) => GM_xmlhttpRequest({
-      method: 'GET', url, timeout: 5000,
-      onload: r => { try { res(JSON.parse(r.responseText)); } catch (e) { rej(e); } },
-      onerror: () => rej(new Error('bridge mati')), ontimeout: () => rej(new Error('bridge timeout')),
-    }));
     const set = (chatId, html, title) => { cekRes.set(chatId, { html, title }); cekShow(chatId, html, title); };
     async function cekWD() {
       const chatId = chatIdNow();
@@ -1379,19 +1420,16 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
         userChat.set(user.toLowerCase(), chatId);
         lastPush.set(user.toLowerCase(), Date.now());   // biar deteksi otomatis ga ngirim dobel
         const t0 = Date.now() - 2000;
-        await new Promise((res, rej) => GM_xmlhttpRequest({
-          method: 'POST', url: BRIDGE + '/push', headers: { 'Content-Type': 'application/json' },
-          data: JSON.stringify({ user }), timeout: 5000,
-          onload: res, onerror: () => rej(new Error('bridge mati? jalankan bridge.py')), ontimeout: () => rej(new Error('bridge timeout')),
-        }));
+        await WDQ.push('', user);
         set(chatId, `<span style="color:#aaa">⏳ cek ${escH(user)} di panel...</span>`);
         log('Cek WD ' + user + ' (tombol)');
         for (let i = 0; i < 45 && !stopped; i++) {       // panel butuh ±2-17 dtk
           await sleep(1000);
-          const r = await getJSON(BRIDGE + '/result?user=' + encodeURIComponent(user));
+          const r = await WDQ.result(user);
           if (r && r.ts >= t0) { const l = wdLabel(r); return set(chatId, l.html, l.title); }
         }
-        set(chatId, '<span style="color:#ff6b6b">panel UG ga jawab (tab panel kebuka?)</span>');
+        set(chatId, '<span style="color:#ff6b6b">panel UG ga jawab (' + (WDQ.jalur() === 'profil'
+          ? 'tab panel UG kebuka di profil Chrome ini?' : 'tab panel kebuka? bridge jalan?') + ')</span>');
       } catch (e) { set(chatId, `<span style="color:#ff6b6b">⚠️ ${escH(e.message)}</span>`); }
     }
 
@@ -1401,6 +1439,151 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
   }
 
   const WDX = SITE === 'lc' ? initWD() : null;
+
+  // #####################################################################
+  // BAGIAN E: PANEL UG (halaman transaction) - 2.0.0, cuma jalan kalau Jalur cek WD = "1 Profil"
+  // Sama kayak script "Panel UG -> auto search username withdraw", tapi antreannya lewat script ini (tanpa bridge).
+  // Jalur "Bridge": bagian ini diam, pakai script Panel UG yang lama + bridge.py.
+  // #####################################################################
+  function initPanelUG() {
+    // kolom diambil berdasarkan judul header tabel, jadi urutan kolom tidak masalah
+    const COLS = {
+      username: /user\s*name/i,
+      status: /^status/i,
+      by: /confirm|reject|approve|process|by/i,
+      note: /note|remark|keterangan/i,
+      debit: /^debit/i,
+      date: /transaction\s*date/i,
+    };
+    const MAX = 30; // jumlah hasil yang disimpan di box
+    // aturan balasan otomatis berdasarkan withdraw terbaru; yang pertama cocok dipakai
+    const RULES = [
+      { key: 'dc', test: r => /double\s*confirm/i.test(r.status) },
+      { key: 'wal', test: r => /gangguan\s*wd|metode\s*bank\s*atau\s*e-?wallet\s*lain/i.test(r.note) },
+    ];
+    const aktif = () => WDQ.jalur() === 'profil';
+
+    // timer lewat Worker: Chrome tidak memperlambatnya walau tab panel di belakang / di-minimize
+    function every(ms, fn) {
+      let stop;
+      try {
+        const w = new Worker(URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${ms})`])));
+        w.onmessage = () => { if (!stopped) fn(); };
+        stop = () => w.terminate();
+      } catch (e) { // CSP halaman melarang Worker -> timer biasa
+        const id = setInterval(fn, ms);
+        stop = () => window.clearInterval(id);
+      }
+      onStop(stop);
+      return stop;
+    }
+
+    // ---------- box UI ----------
+    const box = document.createElement('div');
+    box.id = 'csw-wdp-box';
+    box.style.cssText = 'position:fixed;right:12px;bottom:12px;width:420px;max-height:50vh;overflow:auto;z-index:99999;' +
+      'background:#fff;border:1px solid #888;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.25);font:12px sans-serif';
+    document.body.appendChild(box);
+    onStop(() => box.remove());
+
+    const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    let statusText = 'siap';
+    const setStatus = t => { statusText = t; render(); };
+    function render() {
+      box.style.display = aktif() ? '' : 'none';
+      const list = GM_getValue('wdp_hist', []);
+      box.innerHTML =
+        '<div style="position:sticky;top:0;background:#333;color:#fff;padding:6px 8px;display:flex;justify-content:space-between">' +
+        '<b>Cek Withdraw (1 Profil)</b><span>' + esc(statusText) + '</span><a href="#" id="wdp-clear" style="color:#fff">clear</a></div>' +
+        (list.length ? '' : '<div style="padding:8px;color:#888">Belum ada data</div>') +
+        list.map(r => `<div style="padding:6px 8px;border-bottom:1px solid #eee">
+          <b>${esc(r.user)}</b> <span style="color:#888">${esc(r.time)}</span>
+          ${r.rows.length ? r.rows.map(x => `<div>• <b>${esc(x.status)}</b> | ${esc(x.debit)} | ${esc(x.date)}<br>&nbsp; ${esc(x.by)} | ${esc(x.note)}</div>`).join('')
+                           : '<div style="color:#c00">tidak ada transaksi withdraw</div>'}
+        </div>`).join('');
+      box.querySelector('#wdp-clear').onclick = e => { e.preventDefault(); GM_setValue('wdp_hist', []); render(); };
+    }
+    render();
+
+    // ---------- ambil isi tabel hasil ----------
+    function scrape(user) {
+      for (const t of document.querySelectorAll('table')) {
+        const heads = [...t.querySelectorAll('thead th')].map(h => h.innerText.trim());
+        const idx = {};
+        for (const k in COLS) idx[k] = heads.findIndex(h => COLS[k].test(h));
+        if (idx.username < 0 || idx.status < 0) continue;
+        return [...t.querySelectorAll('tbody tr')]
+          .filter(tr => tr.cells.length > 1 && (tr.cells[idx.username]?.innerText || '').trim().toLowerCase() === user.toLowerCase())
+          .map(tr => {
+            const get = k => idx[k] >= 0 ? (tr.cells[idx[k]]?.innerText || '').trim() : '';
+            return { status: get('status'), by: get('by'), note: get('note'), debit: get('debit'), date: get('date').replace(/^Game Wallet\s*/i, '').slice(0, 19) };
+          });
+      }
+      return null; // tabel belum ada
+    }
+
+    // withdraw = baris dengan Debit bukan 0; tabel urut terbaru di atas, jadi ambil yang pertama
+    const latestWD = rows => rows.filter(r => r.debit && !/^0(\.0+)?$/.test(r.debit.replace(/,/g, ''))).slice(0, 1);
+
+    function save(user, rows) {
+      const list = GM_getValue('wdp_hist', []).filter(r => r.user !== user);
+      list.unshift({ user, time: new Date().toLocaleTimeString(), rows });
+      GM_setValue('wdp_hist', list.slice(0, MAX));
+      render();
+    }
+
+    // ---------- search ----------
+    let busy = false;
+    function search(user) {
+      const crit = document.getElementById('sel1');          // Search Criteria
+      const input = document.getElementById('user_name');    // kolom Username
+      const btn = document.getElementById('lahanat_member'); // tombol Search
+      if (!crit || !input || !btn) return console.warn('[WD] form tidak ketemu');
+      const $ = PW.jQuery;
+      busy = true;
+      GM_setValue('wdp_pending', user); // kalau Search me-reload halaman, lanjut ditunggu setelah load
+      crit.value = 'user_name';
+      $ ? $(crit).trigger('change') : crit.dispatchEvent(new Event('change', { bubbles: true }));
+      input.value = user;
+      btn.click();
+      setStatus('mencari ' + user + '...');
+      waitResult(user);
+    }
+
+    // tunggu tabel menampilkan baris username ini, maksimal 15 detik
+    function waitResult(user) {
+      busy = true;
+      let n = 0;
+      const stop = every(500, () => {
+        const rows = scrape(user);
+        if ((rows && rows.length) || ++n >= 30) {
+          stop();
+          GM_setValue('wdp_pending', '');
+          const wd = latestWD(rows || []);
+          save(user, wd);
+          setStatus(rows && rows.length ? 'selesai ' + user : 'tidak ketemu ' + user);
+          // hasil -> tampil di samping tombol Cek WD di LiveChat
+          WDQ.setResult(user, Object.assign({ found: !!wd[0] }, wd[0] || {})).catch(() => {});
+          // withdraw terbaru cocok aturan -> minta LiveChat kirim balasannya (#dc / #wal)
+          const rule = wd[0] && RULES.find(x => x.test(wd[0]));
+          if (rule) WDQ.push(rule.key, user).catch(() => {});
+          busy = false;
+        }
+      });
+    }
+    const pending = GM_getValue('wdp_pending', '');
+    if (pending && aktif()) waitResult(pending);
+
+    every(2000, async () => {
+      render();
+      if (busy || !aktif()) return;
+      const user = await WDQ.pull('').catch(() => '');
+      if (user && !stopped) search(user);
+    });
+    console.log('%c[WD panel]', 'color:#0a0;font-weight:bold', 'siap, jalur:', WDQ.jalur());
+    return {};
+  }
+  const PUG = SITE === 'ug' ? initPanelUG() : null;
 
   // #####################################################################
   // BAGIAN B: CS INBOX HELPER (LiveChat & Text)
@@ -1856,6 +2039,7 @@ html[data-csw-dark] #csw-bar .csw-need.red{background:#e5484d;color:#fff}
 #csw-native .mode{background:#8b8f98;color:#fff}
 #csw-native .mode[data-m="utama"]{background:#00893C}
 #csw-native .mode[data-m="cadangan"]{background:#d97706}
+#csw-native .mode[data-m="profil"]{background:#2f6fed}
 .csw-ar{flex:none;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:16px;height:16px;
   margin:0 6px;border-radius:4px;border:2px solid #8b8f98;cursor:pointer;vertical-align:middle;
   font:700 11px/1 system-ui,sans-serif;color:#fff;background:transparent}
@@ -1905,6 +2089,9 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         + (SAPA ? '<div class="r" data-row="sapa" title="Utama = langsung sapa. Cadangan = sapa cuma kalau komputer Utama belum nyapa (±5 dtk). '
           + '1 akun di 2 komputer: pilih Utama di SATU komputer saja."><span class="t">Sapaan otomatis</span>'
           + '<button type="button" class="mode"></button></div>' : '')
+        + (SITE === 'lc' ? '<div class="r" data-row="jalur" title="Bridge = pakai bridge.py (panel UG di profil / komputer lain). '
+          + '1 Profil = panel UG kebuka di profil Chrome yang sama, tanpa bridge."><span class="t">Jalur cek WD</span>'
+          + '<button type="button" class="mode jalur"></button></div>' : '')
         + '<div class="r u" title="Update script tanpa refresh halaman"><span class="t v"></span>'
         + '<button type="button" data-act="upd">Cek update</button></div>';
     }
@@ -1921,6 +2108,12 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         const m = SAPA.getMode();
         setText(mb, { utama: '⚡ Utama', cadangan: 'Cadangan', off: 'Off' }[m] || m);
         if (mb.dataset.m !== m) mb.dataset.m = m;
+      }
+      const jb = nat.querySelector('.jalur');
+      if (jb) {
+        const j = WDQ.jalur();
+        setText(jb, j === 'profil' ? '1 Profil' : 'Bridge');
+        if (jb.dataset.m !== j) jb.dataset.m = j;
       }
       const ub = nat.querySelector('[data-act=upd]');
       setText(nat.querySelector('.v'), env.updLabel());
@@ -1960,6 +2153,11 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         const r = e.target.closest('.r');
         if (!r || r.classList.contains('u')) return;
         e.preventDefault();
+        if (r.dataset.row === 'jalur') {
+          WDQ.setJalur(WDQ.jalur() === 'profil' ? 'bridge' : 'profil');
+          natFill();
+          return;
+        }
         if (r.dataset.row === 'sapa') {
           const urut = ['utama', 'cadangan', 'off'];
           SAPA.setMode(urut[(urut.indexOf(SAPA.getMode()) + 1) % urut.length]);
@@ -2274,7 +2472,8 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     log('aktif di', SITE);
   }
 
-  if (document.readyState === 'loading') on(document, 'DOMContentLoaded', initInbox, { once: true });
+  if (SITE === 'ug') { /* panel UG: daftar chat ga ada */ }
+  else if (document.readyState === 'loading') on(document, 'DOMContentLoaded', initInbox, { once: true });
   else initInbox();
   } // akhir APP
 
@@ -2298,9 +2497,9 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     const ver = (code.match(/@version\s+(\S+)/) || [])[1];
     if (!ver) throw new Error('@version ga ketemu');
     const h = {};
-    new Function('GM_getValue', 'GM_setValue', 'unsafeWindow', 'GM_xmlhttpRequest', 'GM_registerMenuCommand', 'GM_info', '__HOT__',
+    new Function('GM_getValue', 'GM_setValue', 'GM_listValues', 'GM_deleteValue', 'unsafeWindow', 'GM_xmlhttpRequest', 'GM_registerMenuCommand', 'GM_info', '__HOT__',
       code + '\n//# sourceURL=cs-helper-v' + ver + '.user.js')(
-      GM_getValue, GM_setValue, PWIN, GM_xmlhttpRequest, GM_registerMenuCommand, { script: { version: ver } }, h);
+      GM_getValue, GM_setValue, GM_listValues, GM_deleteValue, PWIN, GM_xmlhttpRequest, GM_registerMenuCommand, { script: { version: ver } }, h);
     if (typeof h.APP !== 'function') throw new Error('format file beda (harus versi 1.7.0 ke atas)');
     return h;
   }
@@ -2388,24 +2587,34 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
   }
 
   // ---------- mulai ----------
-  // kalau tadi udah pernah update lewat tombol & versinya lebih baru dari yang terpasang -> pakai itu
+  // 2.0.0: @match "*/transaction*" juga kena web lain -> di luar LiveChat/Text script cuma jalan kalau ini halaman panel UG
   let curFn = APP;
-  const cache = GM_getValue(K_UPD, null);
-  if (cache && cache.code && cmpVer(cache.ver, VERSION) > 0) {
-    try { curFn = unpack(cache.code).APP; env.version = cache.ver; } catch (e) { lg('Versi simpanan rusak, pakai versi terpasang', e); }
-  } else if (cache) GM_setValue(K_UPD, null);
-  if (!run(curFn) && curFn !== APP) {
-    lg('Versi simpanan error, balik ke versi terpasang');
-    GM_setValue(K_UPD, null);
-    curFn = APP;
-    env.version = VERSION;
-    run(APP);
-  }
-  lg(`v${env.version} jalan`);
+  function boot() {
+    // kalau tadi udah pernah update lewat tombol & versinya lebih baru dari yang terpasang -> pakai itu
+    const cache = GM_getValue(K_UPD, null);
+    if (cache && cache.code && cmpVer(cache.ver, VERSION) > 0) {
+      try { curFn = unpack(cache.code).APP; env.version = cache.ver; } catch (e) { lg('Versi simpanan rusak, pakai versi terpasang', e); }
+    } else if (cache) GM_setValue(K_UPD, null);
+    if (!run(curFn) && curFn !== APP) {
+      lg('Versi simpanan error, balik ke versi terpasang');
+      GM_setValue(K_UPD, null);
+      curFn = APP;
+      env.version = VERSION;
+      run(APP);
+    }
+    lg(`v${env.version} jalan`);
 
-  // cek diam-diam berkala; kalau ada versi baru tombol Update jadi ungu (atau langsung dipasang kalau AUTO_UPDATE)
-  const autoCheck = async () => { await check(); if (AUTO_UPDATE && U.st === 'avail') apply(); };
-  window.setTimeout(autoCheck, 15000);
-  window.setInterval(autoCheck, CEK_MENIT * 60000);
-  GM_registerMenuCommand('🔄 Update script sekarang', () => env.updClick());
+    // cek diam-diam berkala; kalau ada versi baru tombol Update jadi ungu (atau langsung dipasang kalau AUTO_UPDATE)
+    const autoCheck = async () => { await check(); if (AUTO_UPDATE && U.st === 'avail') apply(); };
+    window.setTimeout(autoCheck, 15000);
+    window.setInterval(autoCheck, CEK_MENIT * 60000);
+    GM_registerMenuCommand('🔄 Update script sekarang', () => env.updClick());
+  }
+  if (/(^|\.)(livechatinc|text)\.com$/i.test(location.hostname)) boot();
+  else {
+    let ok = false;
+    const go = () => { if (!ok && document.getElementById('lahanat_member')) { ok = true; boot(); } };
+    document.addEventListener('DOMContentLoaded', go, { once: true });
+    window.addEventListener('load', () => { go(); window.setTimeout(go, 3000); }, { once: true });
+  }
 })();
