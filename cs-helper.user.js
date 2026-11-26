@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.2.0
+// @version      2.3.0
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil / Tanpa tab). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
 // @match        https://text.com/app/*
 // @match        https://*/transaction*
+// @match        http://127.0.0.1:8765/worker*
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -57,7 +58,9 @@
   function APP(env) {
   const PW = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;   // window asli halaman
   // 2.0.0: 'ug' = panel UG (halaman transaction), cuma dipakai jalur WD "1 Profil"
-  const SITE = /(^|\.)text\.com$/i.test(location.hostname) ? 'text' : /(^|\.)livechatinc\.com$/i.test(location.hostname) ? 'lc' : 'ug';
+  // 2.3.0: 'worker' = halaman kecil bridge.py (http://127.0.0.1:8765/worker) di profil panel UG
+  const SITE = /(^|\.)text\.com$/i.test(location.hostname) ? 'text' : /(^|\.)livechatinc\.com$/i.test(location.hostname) ? 'lc'
+    : (location.hostname === '127.0.0.1' && location.pathname.startsWith('/worker')) ? 'worker' : 'ug';
 
   // 1.7.0: semua yang dipasang script dicatat di sini, biar pas update bisa dicopot bersih (ga dobel)
   let stopped = false;
@@ -1135,6 +1138,21 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
   //                               (ngobrol lewat penyimpanan Tampermonkey script ini)
   // Dipilih per browser lewat menu ikon slider daftar chat: "Jalur cek WD".
   // #####################################################################
+  // timer lewat Worker: Chrome tidak memperlambatnya walau tab panel di belakang / di-minimize
+  function every(ms, fn) {
+    let stop;
+    try {
+      const w = new Worker(URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${ms})`])));
+      w.onmessage = () => { if (!stopped) fn(); };
+      stop = () => w.terminate();
+    } catch (e) { // CSP halaman melarang Worker -> timer biasa
+      const id = setInterval(fn, ms);
+      stop = () => window.clearInterval(id);
+    }
+    onStop(stop);
+    return stop;
+  }
+
   // ---------- tabel transaksi panel UG (dipakai jalur "1 Profil" & "Tanpa tab") ----------
   // kolom diambil berdasarkan judul header tabel, jadi urutan kolom tidak masalah
   const COLS = {
@@ -1249,6 +1267,7 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
         return GM_getValue(R + user.toLowerCase(), {}) || {};
       },
       lookup,
+      bridge: (method, path, body) => gx(method, BR + path, body),   // 2.3.0: buat halaman worker
     };
   })();
 
@@ -1471,6 +1490,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
     const chatIdNow = () => (location.pathname.match(/\/chats\/([^/?#]+)/) || [])[1] || '';
     const escH = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
     function wdLabel(r) {
+      if (r.error) return { html: `<span style="color:#ff6b6b">⚠️ ${escH(r.error)}</span>`, title: '' };
       if (!r.found) return { html: '<span style="color:#aaa">❓ tidak ada withdraw</span>', title: '' };
       const s = r.status || '-';
       const title = [r.debit && 'Debit: ' + r.debit, r.date && 'Tgl: ' + r.date, r.by && 'Oleh: ' + r.by, r.note && 'Note: ' + r.note].filter(Boolean).join('\n');
@@ -1561,21 +1581,6 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
     const MAX = 30; // jumlah hasil yang disimpan di box
     const aktif = () => WDQ.jalur() === 'profil';
 
-    // timer lewat Worker: Chrome tidak memperlambatnya walau tab panel di belakang / di-minimize
-    function every(ms, fn) {
-      let stop;
-      try {
-        const w = new Worker(URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${ms})`])));
-        w.onmessage = () => { if (!stopped) fn(); };
-        stop = () => w.terminate();
-      } catch (e) { // CSP halaman melarang Worker -> timer biasa
-        const id = setInterval(fn, ms);
-        stop = () => window.clearInterval(id);
-      }
-      onStop(stop);
-      return stop;
-    }
-
     // ---------- box UI ----------
     const box = document.createElement('div');
     box.id = 'csw-wdp-box';
@@ -1664,6 +1669,64 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
     return {};
   }
   const PUG = SITE === 'ug' ? initPanelUG() : null;
+
+  // #####################################################################
+  // BAGIAN F: WORKER BRIDGE (2.3.0) - halaman http://127.0.0.1:8765/worker dibuka di PROFIL PANEL UG
+  // Ganti tab transaction: ambil antrean dari bridge, tanya panel UG di belakang layar pakai login panel
+  // di profil ini, kirim hasil + aturan #dc / #wal balik ke bridge. LiveChat tetap jalur "Bridge".
+  // #####################################################################
+  function initWorker() {
+    const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    document.title = 'CS Helper - Worker WD';
+    document.body.style.cssText = 'margin:0;background:#1f2229;color:#eee;font:13px system-ui,sans-serif';
+    document.body.innerHTML = `<div style="max-width:720px;margin:24px auto;padding:0 16px">
+      <h2 style="margin:0 0 4px">🔎 Worker Cek WD</h2>
+      <div style="color:#aaa;margin-bottom:12px">Biarkan tab ini terbuka di profil panel UG (boleh di-pin / di belakang). Halaman panel tidak perlu dibuka.</div>
+      <div id="st" style="margin-bottom:10px"></div>
+      <div style="margin-bottom:12px">Alamat panel UG: <input id="url" style="width:260px;background:#2b2f38;color:#eee;border:1px solid #555;border-radius:4px;padding:3px 6px">
+        <button id="save" style="border:0;border-radius:999px;padding:4px 12px;background:#2f6fed;color:#fff;cursor:pointer">Simpan</button></div>
+      <pre id="log" style="background:#15171c;border-radius:6px;padding:8px;min-height:200px;white-space:pre-wrap;font:12px monospace;color:#ccc"></pre></div>`;
+    const $ = (id) => document.getElementById(id);
+    $('url').value = GM_getValue('wdPanelUrl', '');
+    $('save').onclick = () => {
+      const v = $('url').value.trim();
+      try { GM_setValue('wdPanelUrl', new URL(/^https?:\/\//i.test(v) ? v : 'https://' + v).origin); $('url').value = GM_getValue('wdPanelUrl', ''); log('alamat panel disimpan'); }
+      catch (e) { log('⚠️ alamat tidak valid'); }
+    };
+    const logs = [];
+    function log(t) {
+      logs.unshift(new Date().toTimeString().slice(0, 8) + ' ' + t);
+      logs.length = Math.min(logs.length, 100);
+      $('log').textContent = logs.join('\n');
+    }
+    const status = (t) => { if ($('st').textContent !== t) $('st').textContent = t; };
+    onStop(() => { document.body.innerHTML = '<p style="font:13px sans-serif">CS Helper lagi di-update...</p>'; });
+
+    let busy = false;
+    every(2000, async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const { user } = await WDQ.bridge('GET', '/pull');
+        status(GM_getValue('wdPanelUrl', '') ? '🟢 Nyambung ke bridge, nunggu antrean' : '🟡 Isi alamat panel UG dulu');
+        if (user && !stopped) {
+          log('cari ' + user + '...');
+          let r;
+          try { r = await WDQ.lookup(user); }
+          catch (e) { r = { user, found: false, error: e.message }; }
+          await WDQ.bridge('POST', '/result', r);
+          const rule = r.found && RULES.find((x) => x.test(r));
+          if (rule) await WDQ.bridge('POST', '/push/' + rule.key, { user });
+          log(user + ': ' + (r.error ? '⚠️ ' + r.error : r.found ? r.status + (r.note ? ' · ' + r.note : '') : 'tidak ada withdraw')
+            + (rule ? '  → #' + rule.key : ''));
+        }
+      } catch (e) { status('🔴 Bridge mati? jalankan bridge.py'); }
+      busy = false;
+    });
+    log('worker siap');
+    return {};
+  }
+  const WRK = SITE === 'worker' ? initWorker() : null;
 
   // #####################################################################
   // BAGIAN B: CS INBOX HELPER (LiveChat & Text)
@@ -2558,7 +2621,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     log('aktif di', SITE);
   }
 
-  if (SITE === 'ug') { /* panel UG: daftar chat ga ada */ }
+  if (SITE === 'ug' || SITE === 'worker') { /* panel UG / worker: daftar chat ga ada */ }
   else if (document.readyState === 'loading') on(document, 'DOMContentLoaded', initInbox, { once: true });
   else initInbox();
   } // akhir APP
@@ -2698,6 +2761,9 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     GM_registerMenuCommand('🔗 Atur alamat panel UG', askPanelUrl);
   }
   if (/(^|\.)(livechatinc|text)\.com$/i.test(location.hostname)) boot();
+  else if (location.hostname === '127.0.0.1') {   // halaman worker bridge.py
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true }); else boot();
+  }
   else {
     let ok = false;
     const go = () => { if (!ok && document.getElementById('lahanat_member')) { ok = true; boot(); } };
