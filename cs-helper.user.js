@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.5.0
+// @version      2.5.1
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -1297,32 +1297,17 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
       if (!a) {
         if (loginPage(d1)) throw new Error('panel UG belum login');
         console.log('%c[TO] hasil search ga ada link member:', 'color:#c00', links.map(tx));
-        return '';
+        return {};
       }
-      return (a.getAttribute('href').match(/member_details\/(\d+)/) || [])[1] || '';
+      const csrf = ((d1.querySelector('meta[name="csrf-token"]') || d0.querySelector('meta[name="csrf-token"]') || {}).content) || '';
+      return { id: (a.getAttribute('href').match(/member_details\/(\d+)/) || [])[1] || '', csrf };
     }
 
-    function parseMember(d) {
-      // Game Wallet Withdraw Status
-      let wd = '';
-      const td = [...d.querySelectorAll('td')].find((e) => /^game wallet withdraw status/i.test(tx(e)));
-      if (td && td.nextElementSibling) {
-        const c = td.nextElementSibling;
-        const inp = c.querySelector('input.withdraw_status_badge') || c.querySelector('input');
-        wd = ((inp && (inp.getAttribute('value') || '')) || '').trim() || tx(c.querySelector('.withdraw_method'));
-      }
-      // Total Target TO: kotak PALING ATAS di popup "Cumulative Deposit Turnover Progress Details"
-      const card = [...d.querySelectorAll('.card')].find((c) => /total reached to/i.test(tx(c)) && /target to/i.test(tx(c)));
-      const t = tx(card);
-      const g = (re) => numOf((t.match(re) || [])[1]);
-      const deposit = g(/total deposit\s*:\s*(?:idr)?\s*([\d.,]+)/i);
-      const reached = g(/total reached to\s*:\s*([\d.,]+)/i);
-      const target = g(/target to\s*:\s*([\d.,]+)/i);
-      // Promotion Turnover & Freebet Turnover: baris yang Remaining Turnover-nya masih > 0
+    // Promotion Turnover & Freebet Turnover (isi tab "Promotion Turnover"): baris yang Remaining Turnover-nya masih > 0
+    function parsePromos(d) {
       const promos = [];
-      const pane = d.getElementById('promotionTurnOver') || d;
-      const titles = [...pane.querySelectorAll('h1,h2,h3,h4,h5,h6')].map(tx);
-      [...pane.querySelectorAll('table')].forEach((tb, i) => {
+      const titles = [...d.querySelectorAll('h1,h2,h3,h4,h5,h6')].map(tx);
+      [...d.querySelectorAll('table')].forEach((tb, i) => {
         const heads = [...tb.querySelectorAll('thead th')].map(tx);
         const iRem = heads.findIndex((h) => /remaining\s*turnover/i.test(h));
         if (iRem < 0) return;
@@ -1336,20 +1321,41 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
           });
         }
       });
-      if (!card) console.log('%c[TO] kotak Total Target TO ga ketemu di halaman member', 'color:#c00');
-      return { hasTO: !!card, deposit, reached, target, sisa: Math.max(0, target - reached),
-        pct: target > 0 ? Math.min(100, (reached / target) * 100) : 0, wd, promos };
+      return promos;
     }
 
+    // Sumber data (sama kayak halaman Member Detail):
+    //  - POST /check_withdraw_status {player_id} -> status WD (1 = ON, 0 = OFF) + pulsa_array (kotak Target TO; [0] = paling atas)
+    //  - GET  /member_details/promotion_turnover/<id> -> tabel Promotion Turnover & Freebet Turnover
     async function toLookup(user) {
       const base = GM_getValue('wdPanelUrl', '');
       if (!base) throw new Error('alamat panel UG belum diisi (menu Tampermonkey > 🔗 Atur alamat panel UG)');
-      const id = await memberIdOf(base, user);
+      let { id, csrf } = await memberIdOf(base, user);
       if (!id) return { user, found: false, ts: Date.now() };
-      const r = await gt('GET', base + '/member_details/' + id);
-      const d = parse(r.responseText);
-      if (loginPage(d) && !d.getElementById('promotionTurnOver')) throw new Error('panel UG belum login');
-      return Object.assign({ user, found: true, memberId: id, ts: Date.now() }, parseMember(d));
+      if (!csrf) {   // jaga-jaga: token CSRF dari halaman member
+        const dm = parse((await gt('GET', base + '/member_details/' + id)).responseText);
+        csrf = ((dm.querySelector('meta[name="csrf-token"]') || {}).content) || '';
+      }
+      const rs = await new Promise((res, rej) => GM_xmlhttpRequest({
+        method: 'POST', url: base + '/check_withdraw_status', data: 'player_id=' + encodeURIComponent(id), timeout: 15000, anonymous: false,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest',
+          'Accept': 'application/json', 'X-CSRF-TOKEN': csrf },
+        onload: res, onerror: () => rej(new Error('panel UG ga bisa dihubungi')), ontimeout: () => rej(new Error('panel UG timeout')),
+      }));
+      let j;
+      try { j = JSON.parse(rs.responseText); } catch (e) {
+        console.log('%c[TO] check_withdraw_status ngasih:', 'color:#c00', rs.status, (rs.responseText || '').slice(0, 300));
+        throw new Error('status WD/TO ga kebaca (HTTP ' + rs.status + (rs.status === 419 ? ', sesi panel habis' : '') + ')');
+      }
+      const top = (j.pulsa_array || [])[0];
+      const deposit = numOf(top && top.deposit_credit), reached = numOf(top && top.reached_withdraw_TO), target = numOf(top && top.withdraw_TO_target);
+      const method = String(j.withdraw_status_update_method || '').trim();
+      const wd = (+j.status === 1 ? 'ON' : 'OFF') + (method ? ' (' + method + ')' : '');
+      const rp = await gt('GET', base + '/member_details/promotion_turnover/' + id);
+      const promos = parsePromos(parse(rp.responseText));
+      return { user, found: true, memberId: id, ts: Date.now(), hasTO: !!top, deposit, reached, target,
+        sisa: Math.max(0, target - reached), pct: target > 0 ? Math.min(100, (reached / target) * 100) : 0,
+        wd, promos, depDate: (top && top.confirm_date) || '' };
     }
 
     const keys = (q) => GM_listValues().filter((k) => k.startsWith(P + q + '|')).sort();
@@ -1696,13 +1702,13 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
     // Jalur Bridge -> antre ke worker (/push/to), tunggu hasil (/result?kind=to). Jalur lain -> tanya panel langsung.
     // Hasil: gambar kotak TO (bisa di-copy) + sisa TO + promotion turnover.
     const fmtN = n => Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const toShort = r => !r.hasTO ? 'Target TO ga kebaca'
+    const toShort = r => !r.hasTO ? 'Belum ada TO deposit'
       : 'Sisa TO ' + fmtN(r.sisa) + ' · Promo ' + ((r.promos || []).length ? 'ada ' + r.promos.length : 'kosong');
     function toText(r) {
       const L = [`Username : ${r.user}`];
       if (r.hasTO) L.push(`Total Deposit : IDR ${fmtN(r.deposit)}`, `TO Reached : ${fmtN(r.reached)}`,
         `Target TO : ${fmtN(r.target)}`, `Sisa TO : ${fmtN(r.sisa)}`);
-      else L.push('Target TO : tidak kebaca');
+      else L.push('Target TO : belum ada TO deposit');
       const ps = r.promos || [];
       L.push('Promotion : ' + (ps.length ? '' : 'kosong'));
       ps.forEach(p => L.push(`- ${p.jenis}${p.date ? ' (' + p.date + ')' : ''} sisa TO ${fmtN(p.remaining)}`));
@@ -1733,7 +1739,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
         g.fillStyle = done ? '#28a745' : '#e5484d'; g.beginPath(); g.roundRect(16, 78, Math.max(8, bw * r.pct / 100), 16, 4); g.fill();
         txt(r.pct.toFixed(2) + '%', done ? 16 + bw / 2 : 22, 90, F(600, 11), done ? '#fff' : '#333', done ? 'center' : 'left');
         txt('Sisa TO : ' + fmtN(r.sisa), 16, 126, F(700, 17), r.sisa > 0 ? '#d63031' : '#16a34a');
-      } else txt('Total Target TO tidak kebaca', 16, 90, F(600, 14), '#d63031');
+      } else txt('Belum ada TO deposit', 16, 90, F(600, 14), '#d63031');
       txt('Game Wallet Withdraw : ', 16, 154, F(500, 13), '#666');
       const x1 = 16 + g.measureText('Game Wallet Withdraw : ').width;
       txt(r.wd || '-', x1, 154, F(700, 13), /on/i.test(r.wd) && !/off/i.test(r.wd) ? '#16a34a' : '#d63031');
@@ -1889,7 +1895,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
           catch (e) { r = { user: toUser, found: false, error: e.message }; }
           await WDQ.bridge('POST', '/result', Object.assign({ kind: 'to' }, r));
           log(toUser + ' (TO): ' + (r.error ? '⚠️ ' + r.error : !r.found ? 'ga ketemu di Account List'
-            : !r.hasTO ? 'Target TO ga kebaca' : 'sisa TO ' + r.sisa.toLocaleString('en-US') + ' · promo ' + (r.promos.length ? 'ada ' + r.promos.length : 'kosong')));
+            : !r.hasTO ? 'Belum ada TO deposit' : 'sisa TO ' + r.sisa.toLocaleString('en-US') + ' · promo ' + (r.promos.length ? 'ada ' + r.promos.length : 'kosong')));
         }
       } catch (e) { status('🔴 Bridge mati? jalankan bridge.py'); }
       busy = false;
