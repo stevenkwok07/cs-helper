@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.5.1
+// @version      2.5.2
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -1312,12 +1312,16 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
         const iRem = heads.findIndex((h) => /remaining\s*turnover/i.test(h));
         if (iRem < 0) return;
         const iDate = heads.findIndex((h) => /date/i.test(h)), iAmt = heads.findIndex((h) => /amount/i.test(h));
+        // 2.5.2: nama bonus = kolom Remark / Promotion / Bonus name (bukan kolom angka)
+        const iName = heads.findIndex((h) => /remark|promo|bonus\s*name|keterangan|description/i.test(h)
+          && !/amount|deposit|turnover|multiply|winning|rollover|winlose/i.test(h));
         for (const tr of tb.querySelectorAll('tbody tr')) {
           if (tr.cells.length <= iRem) continue;
           const rem = numOf(tx(tr.cells[iRem]));
           if (rem > 0) promos.push({
             jenis: titles[i] || 'Promotion', remaining: rem,
             date: iDate >= 0 ? tx(tr.cells[iDate]).slice(0, 19) : '', amount: iAmt >= 0 ? tx(tr.cells[iAmt]) : '',
+            bonus: iName >= 0 && iName < tr.cells.length ? tx(tr.cells[iName]).slice(0, 80) : '',
           });
         }
       });
@@ -1650,6 +1654,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
           + '<span class="res" style="overflow:hidden;text-overflow:ellipsis"></span>';
         cekEl.querySelector('[data-act=wd]').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); cekWD(); });
         cekEl.querySelector('[data-act=to]').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); cekTO(); });
+        cekEl.addEventListener('click', e => { if (e.target.closest('[data-a=recopy]')) { e.preventDefault(); e.stopPropagation(); recopyTO(); } });
       }
       if (h.nextSibling !== cekEl) h.after(cekEl);
       const id = chatIdNow();
@@ -1700,10 +1705,13 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
 
     // ---------- 2.5.0: tombol Cek TO ----------
     // Jalur Bridge -> antre ke worker (/push/to), tunggu hasil (/result?kind=to). Jalur lain -> tanya panel langsung.
-    // Hasil: gambar kotak TO (bisa di-copy) + sisa TO + promotion turnover.
+    // 2.5.2: klik Cek TO -> gambar kotak TO langsung ke-copy (ga ditampilin), di samping tombol cuma teks promo.
     const fmtN = n => Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const toShort = r => !r.hasTO ? 'Belum ada TO deposit'
-      : 'Sisa TO ' + fmtN(r.sisa) + ' · Promo ' + ((r.promos || []).length ? 'ada ' + r.promos.length : 'kosong');
+    const promoName = p => p.bonus || p.amount || p.jenis;
+    const promoLine = r => {
+      const ps = r.promos || [];
+      return ps.length ? ps.map(p => `${promoName(p)} · sisa TO ${fmtN(p.remaining)}`).join(' | ') : 'Promo kosong';
+    };
     function toText(r) {
       const L = [`Username : ${r.user}`];
       if (r.hasTO) L.push(`Total Deposit : IDR ${fmtN(r.deposit)}`, `TO Reached : ${fmtN(r.reached)}`,
@@ -1711,12 +1719,12 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       else L.push('Target TO : belum ada TO deposit');
       const ps = r.promos || [];
       L.push('Promotion : ' + (ps.length ? '' : 'kosong'));
-      ps.forEach(p => L.push(`- ${p.jenis}${p.date ? ' (' + p.date + ')' : ''} sisa TO ${fmtN(p.remaining)}`));
+      ps.forEach(p => L.push(`- ${promoName(p)}${p.date ? ' (' + p.date + ')' : ''} sisa TO ${fmtN(p.remaining)}`));
       return L.join('\n');
     }
+    // gambar = kotak Target TO aja (Total Deposit, Reached/Target, progress, Sisa TO)
     function toCanvas(r) {
-      const ps = r.promos || [];
-      const W = 460, H = 206 + Math.max(1, ps.length) * 20, K = 2;
+      const W = 460, H = 142, K = 2;
       const c = document.createElement('canvas');
       c.width = W * K; c.height = H * K;
       const g = c.getContext('2d');
@@ -1731,92 +1739,81 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       const x0 = 16 + g.measureText('Total Deposit : ').width;
       txt(r.hasTO ? 'IDR ' + fmtN(r.deposit) : '-', x0, 27, F(600, 13), '#f0a020');
       txt(r.user, W - 16, 27, F(600, 12), '#888', 'right');
-      if (r.hasTO) {
-        txt('Total Reached TO : ' + fmtN(r.reached), 16, 68, F(400, 13), '#666');
-        txt('Target TO : ' + fmtN(r.target), W - 16, 68, F(400, 13), '#666', 'right');
-        const bw = W - 32, done = r.pct >= 100;
-        g.fillStyle = '#e9ecef'; g.beginPath(); g.roundRect(16, 78, bw, 16, 4); g.fill();
-        g.fillStyle = done ? '#28a745' : '#e5484d'; g.beginPath(); g.roundRect(16, 78, Math.max(8, bw * r.pct / 100), 16, 4); g.fill();
-        txt(r.pct.toFixed(2) + '%', done ? 16 + bw / 2 : 22, 90, F(600, 11), done ? '#fff' : '#333', done ? 'center' : 'left');
-        txt('Sisa TO : ' + fmtN(r.sisa), 16, 126, F(700, 17), r.sisa > 0 ? '#d63031' : '#16a34a');
-      } else txt('Belum ada TO deposit', 16, 90, F(600, 14), '#d63031');
-      txt('Game Wallet Withdraw : ', 16, 154, F(500, 13), '#666');
-      const x1 = 16 + g.measureText('Game Wallet Withdraw : ').width;
-      txt(r.wd || '-', x1, 154, F(700, 13), /on/i.test(r.wd) && !/off/i.test(r.wd) ? '#16a34a' : '#d63031');
-      txt('Promotion : ', 16, 180, F(500, 13), '#666');
-      if (!ps.length) txt('kosong', 16 + g.measureText('Promotion : ').width, 180, F(700, 13), '#16a34a');
-      ps.forEach((p, i) => txt(`• ${p.jenis}${p.date ? ' (' + p.date + ')' : ''} — sisa TO ${fmtN(p.remaining)}`,
-        24, 202 + i * 20, F(600, 12), '#d63031'));
+      if (!r.hasTO) { txt('Belum ada TO deposit', 16, 90, F(600, 14), '#d63031'); return c; }
+      txt('Total Reached TO : ' + fmtN(r.reached), 16, 68, F(400, 13), '#666');
+      txt('Target TO : ' + fmtN(r.target), W - 16, 68, F(400, 13), '#666', 'right');
+      const bw = W - 32, done = r.pct >= 100;
+      g.fillStyle = '#e9ecef'; g.beginPath(); g.roundRect(16, 78, bw, 16, 4); g.fill();
+      g.fillStyle = done ? '#28a745' : '#e5484d'; g.beginPath(); g.roundRect(16, 78, Math.max(8, bw * r.pct / 100), 16, 4); g.fill();
+      txt(r.pct.toFixed(2) + '%', done ? 16 + bw / 2 : 22, 90, F(600, 11), done ? '#fff' : '#333', done ? 'center' : 'left');
+      txt('Sisa TO : ' + fmtN(r.sisa), 16, 126, F(700, 17), r.sisa > 0 ? '#d63031' : '#16a34a');
       return c;
     }
-    let toPop = null;
-    onStop(() => { if (toPop) toPop.remove(); });
-    function showTO(r) {
-      if (toPop) toPop.remove();
-      const cv = toCanvas(r);
-      cv.style.cssText = 'display:block;width:460px;border-radius:6px';
-      toPop = document.createElement('div');
-      toPop.id = 'csw-to-pop';
-      toPop.style.cssText = 'position:fixed;top:72px;right:24px;z-index:99999;background:#1f2229;padding:8px;border-radius:10px;'
-        + 'box-shadow:0 6px 24px #0009;font:600 12px system-ui,sans-serif;color:#eee';
-      const bs = 'border:0;border-radius:999px;padding:5px 12px;cursor:pointer;font:inherit;color:#fff;background:';
-      toPop.innerHTML = `<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-          <span style="flex:1">Cek TO · ${escH(r.user)}</span>
-          <button type="button" data-a="img" style="${bs}#7c3aed">📋 Copy gambar</button>
-          <button type="button" data-a="txt" style="${bs}#3a3f4b">Copy teks</button>
-          <button type="button" data-a="x" style="${bs}#3a3f4b">✕</button></div><div class="msg" style="margin-top:6px;color:#8c8;display:none"></div>`;
-      toPop.insertBefore(cv, toPop.querySelector('.msg'));
-      const msg = (t, ok = true) => { const m = toPop.querySelector('.msg'); m.style.display = ''; m.style.color = ok ? '#8c8' : '#ff8080'; m.textContent = t; };
-      toPop.addEventListener('click', e => {
-        const a = e.target.closest('[data-a]');
-        if (!a) return;
-        e.preventDefault(); e.stopPropagation();
-        if (a.dataset.a === 'x') { toPop.remove(); toPop = null; return; }
-        if (a.dataset.a === 'txt') {
-          navigator.clipboard.writeText(toText(r)).then(() => msg('✅ Teks ke-copy')).catch(er => msg('⚠️ ' + er.message, false));
-          return;
+    const toBlob = r => new Promise((res, rej) => toCanvas(r).toBlob(b => (b ? res(b) : rej(new Error('gagal bikin gambar'))), 'image/png'));
+    // copy gambar: ClipboardItem dibikin LANGSUNG waktu klik (biar izin copy dari klik ga kedaluwarsa), gambarnya nyusul
+    function copyImg(blobPromise) {
+      try { return navigator.clipboard.write([new ClipboardItem({ 'image/png': blobPromise })]); }
+      catch (e) { return Promise.reject(e); }
+    }
+    const lastTO = new Map();   // chat_id -> hasil Cek TO terakhir (buat tombol copy ulang)
+
+    // ambil data TO (nunggu worker / tanya panel), lempar error kalau gagal
+    async function getTO(chatId) {
+      const ch = await rtm('get_chat', { chat_id: chatId });
+      const user = usernameOf(ch, ch.thread?.events);
+      if (!user) throw new Error('username tidak ketemu');
+      set(chatId, `<span style="color:#aaa">⏳ cek TO ${escH(user)} di panel...</span>`);
+      log('Cek TO ' + user + ' (' + (WDQ.jalur() === 'bridge' ? 'worker' : 'tanpa tab') + ')');
+      let r = null;
+      if (WDQ.jalur() === 'bridge') {
+        const t0 = Date.now() - 2000;
+        await WDQ.bridge('POST', '/push/to', { user });
+        for (let i = 0; i < 45 && !stopped && !r; i++) {
+          await sleep(1000);
+          const x = await WDQ.bridge('GET', '/result?kind=to&user=' + encodeURIComponent(user));
+          if (x && x.ts >= t0) r = x;
         }
-        const blob = new Promise((res, rej) => cv.toBlob(b => (b ? res(b) : rej(new Error('gagal bikin gambar'))), 'image/png'));
-        navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-          .then(() => msg('✅ Gambar ke-copy, tinggal Ctrl+V'))
-          .catch(er => msg('⚠️ Gagal copy: ' + er.message, false));
-      });
-      document.body.appendChild(toPop);
+        if (!r) throw new Error('worker ga jawab (tab worker kebuka? bridge.py jalan & versi baru?)');
+      } else r = await WDQ.toLookup(user);
+      if (r.error) throw new Error(r.error);
+      if (!r.found) throw new Error(user + ' ga ketemu di Account List');
+      return r;
+    }
+
+    function showTOres(chatId, r, copied) {
+      const col = (r.promos || []).length ? '#fbbf24' : '#4ade80';
+      const cp = copied ? '<span style="color:#4ade80">📋 TO ke-copy</span>'
+        : '<a href="#" data-a="recopy" style="color:#c4a5ff" title="Copy gambar TO">📋 copy gambar</a>';
+      set(chatId, `${cp} <span style="color:${col}">· ${escH(promoLine(r))}</span>`, toText(r));
     }
 
     let toBusy = false;
-    async function cekTO() {
+    function cekTO() {
       const chatId = chatIdNow();
       if (!chatId || toBusy) return;
       if (!sock) return set(chatId, '<span style="color:#ff6b6b">koneksi LiveChat belum siap</span>');
       toBusy = true;
       set(chatId, '<span style="color:#aaa">⏳ cek TO...</span>');
-      try {
-        const ch = await rtm('get_chat', { chat_id: chatId });
-        const user = usernameOf(ch, ch.thread?.events);
-        if (!user) return set(chatId, '<span style="color:#ff6b6b">username tidak ketemu</span>');
-        set(chatId, `<span style="color:#aaa">⏳ cek TO ${escH(user)} di panel...</span>`);
-        log('Cek TO ' + user + ' (' + (WDQ.jalur() === 'bridge' ? 'worker' : 'tanpa tab') + ')');
-        let r = null;
-        if (WDQ.jalur() === 'bridge') {
-          const t0 = Date.now() - 2000;
-          await WDQ.bridge('POST', '/push/to', { user });
-          for (let i = 0; i < 45 && !stopped && !r; i++) {
-            await sleep(1000);
-            const x = await WDQ.bridge('GET', '/result?kind=to&user=' + encodeURIComponent(user));
-            if (x && x.ts >= t0) r = x;
-          }
-          if (!r) throw new Error('worker ga jawab (tab worker kebuka? bridge.py jalan & versi baru?)');
-        } else r = await WDQ.toLookup(user);
-        if (r.error) throw new Error(r.error);
-        if (!r.found) return set(chatId, `<span style="color:#aaa">❓ ${escH(user)} ga ketemu di Account List</span>`);
-        set(chatId, `<span style="color:${r.hasTO && r.sisa > 0 ? '#fbbf24' : '#4ade80'}">🎯 ${escH(toShort(r))}</span>`, toText(r));
-        log(user + ': ' + toShort(r));
-        showTO(r);
-      } catch (e) {
+      const job = getTO(chatId);
+      const copyP = copyImg(job.then(toBlob));
+      copyP.catch(() => {});
+      job.then(async (r) => {
+        let ok = true;
+        try { await copyP; } catch (e) { ok = false; log('copy gambar TO gagal: ' + e.message); }
+        lastTO.set(chatId, r);
+        showTOres(chatId, r, ok);
+        log(r.user + ': sisa TO ' + fmtN(r.sisa) + ' · ' + promoLine(r) + (ok ? ' (gambar ke-copy)' : ''));
+      }).catch((e) => {
         set(chatId, `<span style="color:#ff6b6b">⚠️ TO: ${escH(e.message)}</span>`);
         log('⚠️ Cek TO: ' + e.message);
-      } finally { toBusy = false; }
+      }).finally(() => { toBusy = false; });
+    }
+    // klik "📋 copy gambar" (kalau copy otomatis tadi gagal, mis. jendela Chrome lagi ga fokus)
+    function recopyTO() {
+      const chatId = chatIdNow(), r = lastTO.get(chatId);
+      if (!r) return;
+      copyImg(toBlob(r)).then(() => showTOres(chatId, r, true))
+        .catch((e) => set(chatId, `<span style="color:#ff6b6b">⚠️ gagal copy: ${escH(e.message)}</span>`));
     }
 
     // habis update tanpa refresh -> langsung numpang koneksi LiveChat yang udah kebuka
