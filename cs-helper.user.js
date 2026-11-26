@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.4.1
-// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Update tanpa refresh.
+// @version      2.5.0
+// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
 // @match        https://text.com/app/*
@@ -1202,9 +1202,10 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
     // pakai sesi login panel UG di Chrome ini; tab panel ga perlu kebuka. Alamat panel kecatat otomatis
     // waktu halaman transaction panel UG pernah dibuka sekali di profil ini.
     let tok = '';
-    const gt = (method, url, data) => new Promise((res, rej) => GM_xmlhttpRequest({
+    // 2.5.0: xhr=false -> kirim kayak form biasa (tanpa X-Requested-With), dipakai search Account List
+    const gt = (method, url, data, xhr = true) => new Promise((res, rej) => GM_xmlhttpRequest({
       method, url, data, timeout: 15000, anonymous: false,   // pakai cookie login panel di Chrome ini
-      headers: data ? { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' } : {},
+      headers: data ? Object.assign({ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }, xhr ? { 'X-Requested-With': 'XMLHttpRequest' } : {}) : {},
       onload: res, onerror: () => rej(new Error('panel UG ga bisa dihubungi')), ontimeout: () => rej(new Error('panel UG timeout')),
     }));
     const parse = (html) => new DOMParser().parseFromString(html || '', 'text/html');
@@ -1245,8 +1246,115 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
       if (!wd.length) wd = latestWD(await cari(base, user, '')); // jaga-jaga: semua transaksi, cara lama
       return Object.assign({ user, found: !!wd[0], ts: Date.now() }, wd[0] || {});
     }
+    // ---------- 2.5.0 CEK TO: Account List -> ID member -> Member Detail (Total Target TO + Promotion Turnover) ----------
+    const numOf = (s) => { const v = parseFloat(String(s || '').replace(/[^\d.\-]/g, '')); return isNaN(v) ? 0 : v; };
+    const tx = (e) => ((e && e.textContent) || '').replace(/\s+/g, ' ').trim();
+    const loginPage = (d) => !!d.querySelector('input[type="password"], input[name="p"]');
+
+    // isi form Search Account List persis kayak klik Search (Search Criteria = Username)
+    async function memberIdOf(base, user) {
+      const r0 = await gt('GET', base + '/account_listing');
+      const d0 = parse(r0.responseText);
+      const f = d0.getElementById('member_search_form');
+      if (!f) {
+        console.log('%c[TO] account_listing ngasih:', 'color:#c00', r0.status, (r0.responseText || '').slice(0, 300));
+        throw new Error(loginPage(d0) ? 'panel UG belum login' : 'form Account List ga ketemu (HTTP ' + r0.status + ')');
+      }
+      const labelFor = (re) => {
+        const lab = [...f.querySelectorAll('label')].find((l) => re.test(tx(l)));
+        if (!lab) return null;
+        const id = lab.getAttribute('for');
+        return (id && f.querySelector('#' + CSS.escape(id))) || lab.parentElement.querySelector('select,input:not([type=hidden])');
+      };
+      const crit = (() => { const s = labelFor(/^search criteria$/i); return s && s.tagName === 'SELECT' ? s : null; })()
+        || [...f.querySelectorAll('select')].find((s) => [...s.options].some((o) => /^user\s*name$/i.test(tx(o))));
+      const uin = (() => { const i = labelFor(/^user\s*name$/i); return i && i.tagName === 'INPUT' ? i : null; })()
+        || f.querySelector('input[name="user_name"], input[name="username"], #user_name');
+      if (!uin || !uin.name) throw new Error('kolom Username di Account List ga ketemu');
+      const body = new URLSearchParams();
+      for (const e of f.querySelectorAll('input[name],select[name],textarea[name]')) {
+        const t = (e.type || '').toLowerCase();
+        if (e.disabled || /^(submit|button|file|reset|image)$/.test(t)) continue;
+        if ((t === 'checkbox' || t === 'radio') && !e.checked) continue;
+        if (e === uin) { body.append(e.name, user); continue; }
+        if (e === crit) {
+          const o = [...e.options].find((x) => /^user\s*name$/i.test(tx(x)));
+          body.append(e.name, o ? o.value : 'user_name');
+          continue;
+        }
+        if (e.tagName === 'SELECT') {
+          if (e.multiple) { for (const o of e.options) if (o.selected) body.append(e.name, o.value); }
+          else body.append(e.name, e.value);
+          continue;
+        }
+        body.append(e.name, e.tagName === 'TEXTAREA' ? e.textContent : (e.getAttribute('value') || ''));
+      }
+      const action = new URL(f.getAttribute('action') || '/account_listing', base + '/').href;
+      const r1 = await gt('POST', action, body.toString(), false);
+      const d1 = parse(r1.responseText);
+      const links = [...d1.querySelectorAll('a[href*="member_details/"]')];
+      const a = links.find((l) => tx(l).toLowerCase() === user.toLowerCase());
+      if (!a) {
+        if (loginPage(d1)) throw new Error('panel UG belum login');
+        console.log('%c[TO] hasil search ga ada link member:', 'color:#c00', links.map(tx));
+        return '';
+      }
+      return (a.getAttribute('href').match(/member_details\/(\d+)/) || [])[1] || '';
+    }
+
+    function parseMember(d) {
+      // Game Wallet Withdraw Status
+      let wd = '';
+      const td = [...d.querySelectorAll('td')].find((e) => /^game wallet withdraw status/i.test(tx(e)));
+      if (td && td.nextElementSibling) {
+        const c = td.nextElementSibling;
+        const inp = c.querySelector('input.withdraw_status_badge') || c.querySelector('input');
+        wd = ((inp && (inp.getAttribute('value') || '')) || '').trim() || tx(c.querySelector('.withdraw_method'));
+      }
+      // Total Target TO: kotak PALING ATAS di popup "Cumulative Deposit Turnover Progress Details"
+      const card = [...d.querySelectorAll('.card')].find((c) => /total reached to/i.test(tx(c)) && /target to/i.test(tx(c)));
+      const t = tx(card);
+      const g = (re) => numOf((t.match(re) || [])[1]);
+      const deposit = g(/total deposit\s*:\s*(?:idr)?\s*([\d.,]+)/i);
+      const reached = g(/total reached to\s*:\s*([\d.,]+)/i);
+      const target = g(/target to\s*:\s*([\d.,]+)/i);
+      // Promotion Turnover & Freebet Turnover: baris yang Remaining Turnover-nya masih > 0
+      const promos = [];
+      const pane = d.getElementById('promotionTurnOver') || d;
+      const titles = [...pane.querySelectorAll('h1,h2,h3,h4,h5,h6')].map(tx);
+      [...pane.querySelectorAll('table')].forEach((tb, i) => {
+        const heads = [...tb.querySelectorAll('thead th')].map(tx);
+        const iRem = heads.findIndex((h) => /remaining\s*turnover/i.test(h));
+        if (iRem < 0) return;
+        const iDate = heads.findIndex((h) => /date/i.test(h)), iAmt = heads.findIndex((h) => /amount/i.test(h));
+        for (const tr of tb.querySelectorAll('tbody tr')) {
+          if (tr.cells.length <= iRem) continue;
+          const rem = numOf(tx(tr.cells[iRem]));
+          if (rem > 0) promos.push({
+            jenis: titles[i] || 'Promotion', remaining: rem,
+            date: iDate >= 0 ? tx(tr.cells[iDate]).slice(0, 19) : '', amount: iAmt >= 0 ? tx(tr.cells[iAmt]) : '',
+          });
+        }
+      });
+      if (!card) console.log('%c[TO] kotak Total Target TO ga ketemu di halaman member', 'color:#c00');
+      return { hasTO: !!card, deposit, reached, target, sisa: Math.max(0, target - reached),
+        pct: target > 0 ? Math.min(100, (reached / target) * 100) : 0, wd, promos };
+    }
+
+    async function toLookup(user) {
+      const base = GM_getValue('wdPanelUrl', '');
+      if (!base) throw new Error('alamat panel UG belum diisi (menu Tampermonkey > 🔗 Atur alamat panel UG)');
+      const id = await memberIdOf(base, user);
+      if (!id) return { user, found: false, ts: Date.now() };
+      const r = await gt('GET', base + '/member_details/' + id);
+      const d = parse(r.responseText);
+      if (loginPage(d) && !d.getElementById('promotionTurnOver')) throw new Error('panel UG belum login');
+      return Object.assign({ user, found: true, memberId: id, ts: Date.now() }, parseMember(d));
+    }
+
     const keys = (q) => GM_listValues().filter((k) => k.startsWith(P + q + '|')).sort();
     return {
+      toLookup,
       jalur,
       setJalur: (v) => GM_setValue('wdJalur', v),
       // q: '' = antrean cari di panel, 'dc' / 'wal' = antrean balasan
@@ -1530,8 +1638,12 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
         cekEl = document.createElement('span');
         cekEl.id = 'csw-wd-cek';
         cekEl.style.cssText = 'display:inline-flex;align-items:center;gap:8px;margin-left:10px;font:600 12px system-ui,sans-serif;min-width:0;overflow:hidden;white-space:nowrap';
-        cekEl.innerHTML = '<button type="button" style="border:0;border-radius:999px;padding:4px 10px;cursor:pointer;font:inherit;background:#2f6fed;color:#fff;flex:none">Cek WD</button><span class="res" style="overflow:hidden;text-overflow:ellipsis"></span>';
-        cekEl.querySelector('button').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); cekWD(); });
+        const bs = 'border:0;border-radius:999px;padding:4px 10px;cursor:pointer;font:inherit;color:#fff;flex:none;background:';
+        cekEl.innerHTML = `<button type="button" data-act="wd" style="${bs}#2f6fed">Cek WD</button>`
+          + `<button type="button" data-act="to" style="${bs}#7c3aed">Cek TO</button>`
+          + '<span class="res" style="overflow:hidden;text-overflow:ellipsis"></span>';
+        cekEl.querySelector('[data-act=wd]').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); cekWD(); });
+        cekEl.querySelector('[data-act=to]').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); cekTO(); });
       }
       if (h.nextSibling !== cekEl) h.after(cekEl);
       const id = chatIdNow();
@@ -1578,6 +1690,127 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
         set(chatId, '<span style="color:#ff6b6b">panel UG ga jawab (' + (WDQ.jalur() === 'profil'
           ? 'tab panel UG kebuka di profil Chrome ini?' : 'tab panel kebuka? bridge jalan?') + ')</span>');
       } catch (e) { set(chatId, `<span style="color:#ff6b6b">⚠️ ${escH(e.message)}</span>`); }
+    }
+
+    // ---------- 2.5.0: tombol Cek TO ----------
+    // Jalur Bridge -> antre ke worker (/push/to), tunggu hasil (/result?kind=to). Jalur lain -> tanya panel langsung.
+    // Hasil: gambar kotak TO (bisa di-copy) + sisa TO + promotion turnover.
+    const fmtN = n => Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const toShort = r => !r.hasTO ? 'Target TO ga kebaca'
+      : 'Sisa TO ' + fmtN(r.sisa) + ' · Promo ' + ((r.promos || []).length ? 'ada ' + r.promos.length : 'kosong');
+    function toText(r) {
+      const L = [`Username : ${r.user}`];
+      if (r.hasTO) L.push(`Total Deposit : IDR ${fmtN(r.deposit)}`, `TO Reached : ${fmtN(r.reached)}`,
+        `Target TO : ${fmtN(r.target)}`, `Sisa TO : ${fmtN(r.sisa)}`);
+      else L.push('Target TO : tidak kebaca');
+      const ps = r.promos || [];
+      L.push('Promotion : ' + (ps.length ? '' : 'kosong'));
+      ps.forEach(p => L.push(`- ${p.jenis}${p.date ? ' (' + p.date + ')' : ''} sisa TO ${fmtN(p.remaining)}`));
+      return L.join('\n');
+    }
+    function toCanvas(r) {
+      const ps = r.promos || [];
+      const W = 460, H = 206 + Math.max(1, ps.length) * 20, K = 2;
+      const c = document.createElement('canvas');
+      c.width = W * K; c.height = H * K;
+      const g = c.getContext('2d');
+      g.scale(K, K);
+      const F = (w, s) => `${w} ${s}px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif`;
+      const txt = (s, x, y, font, col, al = 'left') => { g.font = font; g.fillStyle = col; g.textAlign = al; g.fillText(s, x, y); };
+      g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+      g.fillStyle = '#f6f7f9'; g.fillRect(0, 0, W, 42);
+      g.strokeStyle = '#e3e6ea'; g.lineWidth = 1; g.strokeRect(.5, .5, W - 1, H - 1);
+      g.beginPath(); g.moveTo(0, 42.5); g.lineTo(W, 42.5); g.stroke();
+      txt('Total Deposit : ', 16, 27, F(500, 13), '#666');
+      const x0 = 16 + g.measureText('Total Deposit : ').width;
+      txt(r.hasTO ? 'IDR ' + fmtN(r.deposit) : '-', x0, 27, F(600, 13), '#f0a020');
+      txt(r.user, W - 16, 27, F(600, 12), '#888', 'right');
+      if (r.hasTO) {
+        txt('Total Reached TO : ' + fmtN(r.reached), 16, 68, F(400, 13), '#666');
+        txt('Target TO : ' + fmtN(r.target), W - 16, 68, F(400, 13), '#666', 'right');
+        const bw = W - 32, done = r.pct >= 100;
+        g.fillStyle = '#e9ecef'; g.beginPath(); g.roundRect(16, 78, bw, 16, 4); g.fill();
+        g.fillStyle = done ? '#28a745' : '#e5484d'; g.beginPath(); g.roundRect(16, 78, Math.max(8, bw * r.pct / 100), 16, 4); g.fill();
+        txt(r.pct.toFixed(2) + '%', done ? 16 + bw / 2 : 22, 90, F(600, 11), done ? '#fff' : '#333', done ? 'center' : 'left');
+        txt('Sisa TO : ' + fmtN(r.sisa), 16, 126, F(700, 17), r.sisa > 0 ? '#d63031' : '#16a34a');
+      } else txt('Total Target TO tidak kebaca', 16, 90, F(600, 14), '#d63031');
+      txt('Game Wallet Withdraw : ', 16, 154, F(500, 13), '#666');
+      const x1 = 16 + g.measureText('Game Wallet Withdraw : ').width;
+      txt(r.wd || '-', x1, 154, F(700, 13), /on/i.test(r.wd) && !/off/i.test(r.wd) ? '#16a34a' : '#d63031');
+      txt('Promotion : ', 16, 180, F(500, 13), '#666');
+      if (!ps.length) txt('kosong', 16 + g.measureText('Promotion : ').width, 180, F(700, 13), '#16a34a');
+      ps.forEach((p, i) => txt(`• ${p.jenis}${p.date ? ' (' + p.date + ')' : ''} — sisa TO ${fmtN(p.remaining)}`,
+        24, 202 + i * 20, F(600, 12), '#d63031'));
+      return c;
+    }
+    let toPop = null;
+    onStop(() => { if (toPop) toPop.remove(); });
+    function showTO(r) {
+      if (toPop) toPop.remove();
+      const cv = toCanvas(r);
+      cv.style.cssText = 'display:block;width:460px;border-radius:6px';
+      toPop = document.createElement('div');
+      toPop.id = 'csw-to-pop';
+      toPop.style.cssText = 'position:fixed;top:72px;right:24px;z-index:99999;background:#1f2229;padding:8px;border-radius:10px;'
+        + 'box-shadow:0 6px 24px #0009;font:600 12px system-ui,sans-serif;color:#eee';
+      const bs = 'border:0;border-radius:999px;padding:5px 12px;cursor:pointer;font:inherit;color:#fff;background:';
+      toPop.innerHTML = `<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+          <span style="flex:1">Cek TO · ${escH(r.user)}</span>
+          <button type="button" data-a="img" style="${bs}#7c3aed">📋 Copy gambar</button>
+          <button type="button" data-a="txt" style="${bs}#3a3f4b">Copy teks</button>
+          <button type="button" data-a="x" style="${bs}#3a3f4b">✕</button></div><div class="msg" style="margin-top:6px;color:#8c8;display:none"></div>`;
+      toPop.insertBefore(cv, toPop.querySelector('.msg'));
+      const msg = (t, ok = true) => { const m = toPop.querySelector('.msg'); m.style.display = ''; m.style.color = ok ? '#8c8' : '#ff8080'; m.textContent = t; };
+      toPop.addEventListener('click', e => {
+        const a = e.target.closest('[data-a]');
+        if (!a) return;
+        e.preventDefault(); e.stopPropagation();
+        if (a.dataset.a === 'x') { toPop.remove(); toPop = null; return; }
+        if (a.dataset.a === 'txt') {
+          navigator.clipboard.writeText(toText(r)).then(() => msg('✅ Teks ke-copy')).catch(er => msg('⚠️ ' + er.message, false));
+          return;
+        }
+        const blob = new Promise((res, rej) => cv.toBlob(b => (b ? res(b) : rej(new Error('gagal bikin gambar'))), 'image/png'));
+        navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+          .then(() => msg('✅ Gambar ke-copy, tinggal Ctrl+V'))
+          .catch(er => msg('⚠️ Gagal copy: ' + er.message, false));
+      });
+      document.body.appendChild(toPop);
+    }
+
+    let toBusy = false;
+    async function cekTO() {
+      const chatId = chatIdNow();
+      if (!chatId || toBusy) return;
+      if (!sock) return set(chatId, '<span style="color:#ff6b6b">koneksi LiveChat belum siap</span>');
+      toBusy = true;
+      set(chatId, '<span style="color:#aaa">⏳ cek TO...</span>');
+      try {
+        const ch = await rtm('get_chat', { chat_id: chatId });
+        const user = usernameOf(ch, ch.thread?.events);
+        if (!user) return set(chatId, '<span style="color:#ff6b6b">username tidak ketemu</span>');
+        set(chatId, `<span style="color:#aaa">⏳ cek TO ${escH(user)} di panel...</span>`);
+        log('Cek TO ' + user + ' (' + (WDQ.jalur() === 'bridge' ? 'worker' : 'tanpa tab') + ')');
+        let r = null;
+        if (WDQ.jalur() === 'bridge') {
+          const t0 = Date.now() - 2000;
+          await WDQ.bridge('POST', '/push/to', { user });
+          for (let i = 0; i < 45 && !stopped && !r; i++) {
+            await sleep(1000);
+            const x = await WDQ.bridge('GET', '/result?kind=to&user=' + encodeURIComponent(user));
+            if (x && x.ts >= t0) r = x;
+          }
+          if (!r) throw new Error('worker ga jawab (tab worker kebuka? bridge.py jalan & versi baru?)');
+        } else r = await WDQ.toLookup(user);
+        if (r.error) throw new Error(r.error);
+        if (!r.found) return set(chatId, `<span style="color:#aaa">❓ ${escH(user)} ga ketemu di Account List</span>`);
+        set(chatId, `<span style="color:${r.hasTO && r.sisa > 0 ? '#fbbf24' : '#4ade80'}">🎯 ${escH(toShort(r))}</span>`, toText(r));
+        log(user + ': ' + toShort(r));
+        showTO(r);
+      } catch (e) {
+        set(chatId, `<span style="color:#ff6b6b">⚠️ TO: ${escH(e.message)}</span>`);
+        log('⚠️ Cek TO: ' + e.message);
+      } finally { toBusy = false; }
     }
 
     // habis update tanpa refresh -> langsung numpang koneksi LiveChat yang udah kebuka
@@ -1646,6 +1879,17 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
           if (rule) await WDQ.bridge('POST', '/push/' + rule.key, { user });
           log(user + ': ' + (r.error ? '⚠️ ' + r.error : r.found ? r.status + (r.note ? ' · ' + r.note : '') : 'tidak ada withdraw')
             + (rule ? '  → #' + rule.key : ''));
+        }
+        // 2.5.0: antrean Cek TO (tombol Cek TO di LiveChat)
+        const { user: toUser } = await WDQ.bridge('GET', '/pull/to');
+        if (toUser && !stopped) {
+          log('cek TO ' + toUser + '...');
+          let r;
+          try { r = await WDQ.toLookup(toUser); }
+          catch (e) { r = { user: toUser, found: false, error: e.message }; }
+          await WDQ.bridge('POST', '/result', Object.assign({ kind: 'to' }, r));
+          log(toUser + ' (TO): ' + (r.error ? '⚠️ ' + r.error : !r.found ? 'ga ketemu di Account List'
+            : !r.hasTO ? 'Target TO ga kebaca' : 'sisa TO ' + r.sisa.toLocaleString('en-US') + ' · promo ' + (r.promos.length ? 'ada ' + r.promos.length : 'kosong')));
         }
       } catch (e) { status('🔴 Bridge mati? jalankan bridge.py'); }
       busy = false;
@@ -2696,4 +2940,4 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     document.addEventListener('DOMContentLoaded', go, { once: true });
     window.addEventListener('load', () => { go(); window.setTimeout(go, 3000); }, { once: true });
   }
-})();
+})();
