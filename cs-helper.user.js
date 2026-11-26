@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.5.3
+// @version      2.5.4
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -1713,7 +1713,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       return ps.length ? ps.map(p => `${promoName(p)} · sisa TO ${fmtN(p.remaining)}`).join(' | ') : 'Promo kosong';
     };
     function toText(r) {
-      const L = [`Username : ${r.user}`];
+      const L = [`Username : ${r.user}`, `Withdraw : ${r.wd || '-'}`];
       if (r.hasTO) L.push(`Total Deposit : IDR ${fmtN(r.deposit)}`, `TO Reached : ${fmtN(r.reached)}`,
         `Target TO : ${fmtN(r.target)}`, `Sisa TO : ${fmtN(r.sisa)}`);
       else L.push('Target TO : belum ada TO deposit');
@@ -1786,7 +1786,10 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       const btn = `<button type="button" data-a="recopy" title="Copy gambar kotak TO (tinggal Ctrl+V)" style="border:0;border-radius:999px;`
         + `padding:3px 10px;cursor:pointer;font:inherit;color:#fff;background:${copied ? '#16a34a' : '#3a3f4b'}">`
         + (copied ? '✅ Ke-copy' : '📋 Copy gambar') + '</button>';
-      set(chatId, `${btn} <span style="color:${col}">${escH(promoLine(r))}</span>`, toText(r));
+      // 2.5.4: status Game Wallet Withdraw (ON hijau / OFF merah)
+      const on = /^on\b/i.test(r.wd || '');
+      const wd = r.wd ? `<span style="color:${on ? '#4ade80' : '#ff6b6b'}">WD ${escH(r.wd)}</span> · ` : '';
+      set(chatId, `${btn} ${wd}<span style="color:${col}">${escH(promoLine(r))}</span>`, toText(r));
     }
 
     let toBusy = false;
@@ -1799,7 +1802,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       getTO(chatId).then((r) => {
         lastTO.set(chatId, r);
         showTOres(chatId, r, false);
-        log(r.user + ': sisa TO ' + fmtN(r.sisa) + ' · ' + promoLine(r));
+        log(r.user + ': WD ' + (r.wd || '-') + ' · sisa TO ' + fmtN(r.sisa) + ' · ' + promoLine(r));
       }).catch((e) => {
         set(chatId, `<span style="color:#ff6b6b">⚠️ TO: ${escH(e.message)}</span>`);
         log('⚠️ Cek TO: ' + e.message);
