@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.1.0
+// @version      2.2.0
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil / Tanpa tab). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -42,6 +42,18 @@
   // #####################################################################
   // APP = seluruh isi script. Bisa dicopot (stop) & dipasang ulang versi baru tanpa refresh.
   // #####################################################################
+  // 2.2.0: alamat panel UG buat jalur "Tanpa tab" bisa diisi manual (ga perlu buka halaman transaction)
+  function askPanelUrl() {
+    const cur = GM_getValue('wdPanelUrl', '');
+    const v = window.prompt('Alamat panel UG (contoh: https://namapanel.com)\nCukup sekali per Chrome. Panel tetap harus login di Chrome ini.', cur);
+    if (v == null) return cur;
+    try {
+      const o = new URL(/^https?:\/\//i.test(v.trim()) ? v.trim() : 'https://' + v.trim()).origin;
+      GM_setValue('wdPanelUrl', o);
+      return o;
+    } catch (e) { window.alert('Alamat tidak valid'); return cur; }
+  }
+
   function APP(env) {
   const PW = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;   // window asli halaman
   // 2.0.0: 'ug' = panel UG (halaman transaction), cuma dipakai jalur WD "1 Profil"
@@ -1201,7 +1213,7 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
     }
     async function lookup(user) {
       const base = GM_getValue('wdPanelUrl', '');
-      if (!base) throw new Error('buka halaman transaction panel UG sekali di Chrome ini biar alamatnya kecatat');
+      if (!base) throw new Error('alamat panel UG belum diisi (menu Tampermonkey > 🔗 Atur alamat panel UG)');
       let wd = latestWD(await cari(base, user, '1'));            // 1 = Debit (cuma withdraw)
       if (!wd.length) wd = latestWD(await cari(base, user, '')); // jaga-jaga: semua transaksi, cara lama
       return Object.assign({ user, found: !!wd[0], ts: Date.now() }, wd[0] || {});
@@ -2225,7 +2237,10 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         e.preventDefault();
         if (r.dataset.row === 'jalur') {
           const urut = ['bridge', 'profil', 'langsung'];
-          WDQ.setJalur(urut[(urut.indexOf(WDQ.jalur()) + 1) % urut.length]);
+          const next = urut[(urut.indexOf(WDQ.jalur()) + 1) % urut.length];
+          // Tanpa tab butuh alamat panel: kalau belum kecatat, tanya sekali
+          if (next === 'langsung' && !GM_getValue('wdPanelUrl', '') && !askPanelUrl()) { WDQ.setJalur('bridge'); natFill(); return; }
+          WDQ.setJalur(next);
           natFill();
           return;
         }
@@ -2680,6 +2695,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     window.setTimeout(autoCheck, 15000);
     window.setInterval(autoCheck, CEK_MENIT * 60000);
     GM_registerMenuCommand('🔄 Update script sekarang', () => env.updClick());
+    GM_registerMenuCommand('🔗 Atur alamat panel UG', askPanelUrl);
   }
   if (/(^|\.)(livechatinc|text)\.com$/i.test(location.hostname)) boot();
   else {
