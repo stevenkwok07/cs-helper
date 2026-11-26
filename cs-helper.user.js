@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      1.8.0
-// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal. + Tombol Update tanpa refresh.
+// @version      1.9.0
+// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat. + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
 // @match        https://text.com/app/*
@@ -1159,6 +1159,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
     if (!WD_AKTIF) return null;
     // tab pengirim diatur bagian Sapaan; kalau Sapaan mati, tab ini dianggap pengirim
     const leader = () => !SAPA || SAPA.isLeader();
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
 
     // ---------- badge status (kiri bawah) ----------
     let badge = null, lastLog = 'nunggu koneksi LiveChat...';
@@ -1313,6 +1314,86 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
           onload: r => { if (stopped) return; try { const { user } = JSON.parse(r.responseText); if (user) sendReply(user, key); } catch (e) {} },
         });
     }, 2000);
+
+    // ---------- 1.9.0: tombol Cek WD di header chat (samping nama customer) ----------
+    // klik -> username dikirim ke panel UG -> hasil (pending / success / reject + note) tampil di sampingnya
+    const cekRes = new Map();   // chat_id -> { html, title } hasil terakhir (balik lagi pas chat dibuka ulang)
+    const chatIdNow = () => (location.pathname.match(/\/chats\/([^/?#]+)/) || [])[1] || '';
+    const escH = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    function wdLabel(r) {
+      if (!r.found) return { html: '<span style="color:#aaa">❓ tidak ada withdraw</span>', title: '' };
+      const s = r.status || '-';
+      const title = [r.debit && 'Debit: ' + r.debit, r.date && 'Tgl: ' + r.date, r.by && 'Oleh: ' + r.by, r.note && 'Note: ' + r.note].filter(Boolean).join('\n');
+      if (/reject|tolak|cancel|decline|fail|gagal/i.test(s))
+        return { html: `<span style="color:#ff6b6b">❌ ${escH(s)}</span>` + (r.note ? `<span style="color:#ffb3b3"> · ${escH(r.note)}</span>` : ''), title };
+      if (/pending|double\s*confirm|process|wait|proses/i.test(s)) return { html: `<span style="color:#fbbf24">⏳ ${escH(s)}</span>`, title };
+      if (/success|sukses|berhasil|approve|complete|done|confirm/i.test(s)) return { html: `<span style="color:#4ade80">✅ ${escH(s)}</span>`, title };
+      return { html: `<span style="color:#ddd">${escH(s)}</span>`, title };
+    }
+    let cekEl = null, cekChat = '';
+    function cekShow(chatId, html, title = '') {
+      if (chatId === chatIdNow() && cekEl) { const o = cekEl.querySelector('.res'); o.innerHTML = html; o.title = title; }
+    }
+    function cekInject() {
+      const h = document.querySelector('[data-testid="feed-container"] h4');
+      if (!h) return;
+      // nama aslinya melebar penuh -> dibikin selebar teksnya biar tombol nempel di samping nama
+      if (h.style.width !== 'auto') { h.style.width = 'auto'; h.style.flex = '0 1 auto'; }
+      if (!cekEl) {
+        cekEl = document.createElement('span');
+        cekEl.id = 'csw-wd-cek';
+        cekEl.style.cssText = 'display:inline-flex;align-items:center;gap:8px;margin-left:10px;font:600 12px system-ui,sans-serif;min-width:0;overflow:hidden;white-space:nowrap';
+        cekEl.innerHTML = '<button type="button" style="border:0;border-radius:999px;padding:4px 10px;cursor:pointer;font:inherit;background:#2f6fed;color:#fff;flex:none">Cek WD</button><span class="res" style="overflow:hidden;text-overflow:ellipsis"></span>';
+        cekEl.querySelector('button').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); cekWD(); });
+      }
+      if (h.nextSibling !== cekEl) h.after(cekEl);
+      const id = chatIdNow();
+      if (id !== cekChat) {          // ganti chat -> tampilkan hasil terakhir chat itu (kalau ada)
+        cekChat = id;
+        const r = cekRes.get(id);
+        cekShow(id, r ? r.html : '', r ? r.title : '');
+      }
+    }
+    setInterval(() => { try { cekInject(); } catch (e) { /* */ } }, 700);
+    onStop(() => {
+      if (cekEl) cekEl.remove();
+      const h = document.querySelector('[data-testid="feed-container"] h4');
+      if (h) { h.style.removeProperty('width'); h.style.removeProperty('flex'); }
+    });
+
+    const getJSON = url => new Promise((res, rej) => GM_xmlhttpRequest({
+      method: 'GET', url, timeout: 5000,
+      onload: r => { try { res(JSON.parse(r.responseText)); } catch (e) { rej(e); } },
+      onerror: () => rej(new Error('bridge mati')), ontimeout: () => rej(new Error('bridge timeout')),
+    }));
+    const set = (chatId, html, title) => { cekRes.set(chatId, { html, title }); cekShow(chatId, html, title); };
+    async function cekWD() {
+      const chatId = chatIdNow();
+      if (!chatId) return;
+      if (!sock) return set(chatId, '<span style="color:#ff6b6b">koneksi LiveChat belum siap</span>');
+      set(chatId, '<span style="color:#aaa">⏳ mencari...</span>');
+      try {
+        const ch = await rtm('get_chat', { chat_id: chatId });
+        const user = usernameOf(ch, ch.thread?.events);
+        if (!user) return set(chatId, '<span style="color:#ff6b6b">username tidak ketemu</span>');
+        userChat.set(user.toLowerCase(), chatId);
+        lastPush.set(user.toLowerCase(), Date.now());   // biar deteksi otomatis ga ngirim dobel
+        const t0 = Date.now() - 2000;
+        await new Promise((res, rej) => GM_xmlhttpRequest({
+          method: 'POST', url: BRIDGE + '/push', headers: { 'Content-Type': 'application/json' },
+          data: JSON.stringify({ user }), timeout: 5000,
+          onload: res, onerror: () => rej(new Error('bridge mati? jalankan bridge.py')), ontimeout: () => rej(new Error('bridge timeout')),
+        }));
+        set(chatId, `<span style="color:#aaa">⏳ cek ${escH(user)} di panel...</span>`);
+        log('Cek WD ' + user + ' (tombol)');
+        for (let i = 0; i < 45 && !stopped; i++) {       // panel butuh ±2-17 dtk
+          await sleep(1000);
+          const r = await getJSON(BRIDGE + '/result?user=' + encodeURIComponent(user));
+          if (r && r.ts >= t0) { const l = wdLabel(r); return set(chatId, l.html, l.title); }
+        }
+        set(chatId, '<span style="color:#ff6b6b">panel UG ga jawab (tab panel kebuka?)</span>');
+      } catch (e) { set(chatId, `<span style="color:#ff6b6b">⚠️ ${escH(e.message)}</span>`); }
+    }
 
     // habis update tanpa refresh -> langsung numpang koneksi LiveChat yang udah kebuka
     if (env.sock && env.sock.readyState === 1) attach(env.sock);
