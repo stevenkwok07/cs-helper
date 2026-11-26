@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      1.7.3
-// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Tombol Update tanpa refresh.
+// @version      1.8.0
+// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal. + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
 // @match        https://text.com/app/*
@@ -14,6 +14,7 @@
 // @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
 // @connect      gist.githubusercontent.com
+// @connect      127.0.0.1
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/stevenkwok07/cs-helper/main/cs-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/stevenkwok07/cs-helper/main/cs-helper.user.js
@@ -1109,6 +1110,216 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
   }
 
   const AR = SITE === 'lc' ? initAutoReply() : null;
+
+  // #####################################################################
+  // BAGIAN D: CEK WITHDRAW + AUTO BALAS #dc / #wal (hanya LiveChat)  - 1.8.0
+  // - pesan customer berisi wd/withdraw di chat MANA PUN -> username dikirim ke panel (bridge.py)
+  // - panel taruh username di antrean /pull/dc atau /pull/wal -> teksnya dikirim ke chat itu
+  // Cuma tab pengirim yang jalan (biar ga dobel kalau LiveChat kebuka di banyak tab).
+  // #####################################################################
+  function initWD() {
+    const W = PW;
+    const WD_AKTIF = true;
+    const BRIDGE = 'http://127.0.0.1:8765';
+    // withdraw + salah ketik (widraw, witdraw, withdrw), wd/wdnya/wd2, tarik/penarikan
+    const WD = /\bwd|w\w{0,3}dr\w?w|\btarik|penarikan/i;
+    const ONLY_MINE = true; // cuma chat yang lagi dipegang akun lo
+    // isi canned response #dc (dikirim lewat koneksi, jadi shortcut #dc tidak bisa dipakai di sini)
+    const DC_TEXT = `Hallo bosskuu 🙌✨
+
+Untuk ID Anda, saat ini proses withdraw sedang berjalan melalui sistem auto withdraw ya bossku 💸
+
+Namun, saat ini sedang ada kendala pada sistem auto withdraw ⚠️
+Jika sistem sudah kembali normal, withdraw Anda akan langsung diproses ke nomor e-wallet / rekening yang terdaftar di ID Anda ✅✨
+
+Apabila sistem masih belum normal, maka withdraw akan otomatis direject dan saldo akan kembali masuk ke ID Anda ya bossku 👍😊
+
+Mohon ditunggu ya bosskuu 🙏
+Terima kasih atas pengertiannya 🔥`;
+    // isi canned response #wal
+    const WAL_TEXT = `Mohon maaf atas ketidaknyamanannya, bossku 🙏
+
+Untuk saat ini, transaksi withdraw melalui BCA, BNI, BRI, MANDIRI, BSI dan SEABANK sedang mengalami gangguan/offline sementara ya, bossku.
+
+Kami sarankan bossku untuk menggunakan rekening Bank atau E-Wallet alternatif yang tersedia agar proses withdraw dapat tetap dilakukan tanpa harus menunggu layanan kembali normal.
+
+E-Wallet yang dapat digunakan:
+- DANA
+- GOPAY
+- LINKAJA
+- OVO
+- SHOPEEPAY
+
+Jika bossku ingin menggunakan rekening Bank atau E-Wallet alternatif, silakan berikan nomor rekening/nomor HP dengan nama pemilik yang sama agar dapat kami bantu tambahkan ke akun bossku ya 😉
+
+Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
+    // kunci antrean dari panel -> teks yang dikirim
+    const REPLIES = { dc: DC_TEXT, wal: WAL_TEXT };
+
+    if (!WD_AKTIF) return null;
+    // tab pengirim diatur bagian Sapaan; kalau Sapaan mati, tab ini dianggap pengirim
+    const leader = () => !SAPA || SAPA.isLeader();
+
+    // ---------- badge status (kiri bawah) ----------
+    let badge = null, lastLog = 'nunggu koneksi LiveChat...';
+    const log = t => {
+      lastLog = new Date().toTimeString().slice(0, 8) + ' ' + t;
+      console.log('%c[WD]', 'color:#0a0;font-weight:bold', t);
+      if (badge) badge.textContent = '[WD] ' + lastLog;
+    };
+    const mkBadge = () => {
+      badge = document.createElement('div');
+      badge.id = 'csw-wd-badge';
+      badge.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;background:#222;color:#0f0;font:11px monospace;' +
+        'padding:3px 6px;border-radius:4px;opacity:.85;pointer-events:none;max-width:60vw;white-space:nowrap;overflow:hidden';
+      badge.textContent = '[WD] ' + lastLog;
+      document.body.appendChild(badge);
+    };
+    if (document.body) mkBadge(); else on(document, 'DOMContentLoaded', mkBadge);
+    onStop(() => { if (badge) badge.remove(); });
+
+    // ---------- numpang koneksi WebSocket LiveChat ----------
+    let sock = null, myId = GM_getValue('myId', null), reqN = 0;
+    const pend = new Map();
+    const proto = W.WebSocket.prototype;
+    const origSend = proto.send;
+    proto.send = function () {
+      try { if (!stopped && this !== sock && /\/agent\/rtm\//.test(String(this.url))) attach(this); } catch (e) {}
+      return origSend.apply(this, arguments);
+    };
+    const mySend = proto.send;
+    onStop(() => { if (proto.send === mySend) proto.send = origSend; });
+
+    function attach(ws) {
+      sock = ws;
+      env.sock = ws;
+      const onClose = () => { if (sock === ws) { sock = null; log('koneksi putus, nunggu LiveChat nyambung lagi'); } };
+      ws.addEventListener('message', onMsg);
+      ws.addEventListener('close', onClose);
+      onStop(() => { ws.removeEventListener('message', onMsg); ws.removeEventListener('close', onClose); });
+      log('terhubung');
+    }
+    function rtm(action, payload, timeout = 15000) {
+      return new Promise((res, rej) => {
+        if (stopped || !sock || sock.readyState !== 1) return rej(new Error('koneksi belum siap'));
+        const id = 'wd_' + ++reqN + '_' + Date.now();
+        pend.set(id, { res, rej });
+        setTimeout(() => { if (pend.delete(id)) rej(new Error('timeout ' + action)); }, timeout);
+        origSend.call(sock, JSON.stringify({ request_id: id, action, payload }));
+      });
+    }
+
+    // ---------- data chat ----------
+    const userChat = new Map(); // username (huruf kecil) -> chat_id
+    // username = jawaban "USER ID" di pre-chat form; kalau tidak ada, nama customer
+    function usernameOf(chat, events) {
+      const forms = (events || []).filter(e => e.type === 'filled_form');
+      const f = chat.last_event_per_type?.filled_form?.event;
+      if (f) forms.push(f);
+      for (const ev of forms)
+        for (const fl of ev.fields || [])
+          if (/user\s*id|username/i.test(fl.label || '') && typeof fl.answer === 'string' && fl.answer.trim()) return fl.answer.trim();
+      return (chat.users || []).find(u => u.type === 'customer')?.name || '';
+    }
+    const formText = events => (events || []).filter(e => e.type === 'filled_form')
+      .flatMap(e => (e.fields || []).map(f => (f.answer && (f.answer.label || f.answer)) || '')).join(' ');
+    const mine = users => !ONLY_MINE || (!!myId && (users || []).some(u => u.id === myId && u.present !== false));
+
+    function onMsg(ev) {
+      let m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.request_id && pend.has(m.request_id)) {
+        const p = pend.get(m.request_id);
+        pend.delete(m.request_id);
+        if (m.success === false) p.rej(new Error(m.payload?.error?.message || 'error'));
+        else p.res(m.payload || {});
+        return;
+      }
+      if (m.action === 'login' && m.type === 'response' && m.payload?.my_profile?.id) {
+        myId = m.payload.my_profile.id;
+        log('akun agent kebaca, siap jalan di belakang layar');
+      }
+      if (m.type !== 'push' || !leader()) return;
+      const p = m.payload || {};
+      // chat baru: pre-chat "Layanan = Withdraw"
+      if (m.action === 'incoming_chat' && p.chat) {
+        const c = p.chat, evs = c.thread?.events || [];
+        if (WD.test(formText(evs))) check(c.id, 'pre-chat withdraw');
+      }
+      // pesan baru di chat mana pun
+      if (m.action === 'incoming_event' && p.event?.type === 'message' && WD.test(p.event.text || '')) {
+        check(p.chat_id, '"' + p.event.text.slice(0, 20) + '"', p.event.author_id);
+      }
+    }
+
+    // pastikan pesan dari customer & chat ini punya lo, lalu kirim username ke panel
+    async function check(chatId, why, authorId) {
+      try {
+        const ch = await rtm('get_chat', { chat_id: chatId });
+        const cust = (ch.users || []).find(u => u.type === 'customer');
+        if (!cust || (authorId && authorId !== cust.id)) return; // pesan dari agent (mis. teks #dc) tidak dihitung
+        if (!mine(ch.users)) return;
+        const user = usernameOf(ch, ch.thread?.events);
+        if (!user) return log('username tidak ketemu di chat ' + chatId);
+        userChat.set(user.toLowerCase(), chatId);
+        push(user, why);
+      } catch (e) { log('gagal baca chat: ' + e.message); }
+    }
+
+    // username sama tidak dikirim ulang dalam 60 detik
+    const lastPush = new Map();
+    function push(user, why) {
+      const k = user.toLowerCase();
+      if (Date.now() - (lastPush.get(k) || 0) < 60000) return;
+      lastPush.set(k, Date.now());
+      GM_xmlhttpRequest({
+        method: 'POST', url: BRIDGE + '/push',
+        headers: { 'Content-Type': 'application/json' }, data: JSON.stringify({ user }),
+        onerror: () => { lastPush.delete(k); log('bridge mati? jalankan bridge.py'); },
+      });
+      log('cek ' + user + ' (' + why + ')');
+    }
+
+    // ---------- balas #dc / #wal ----------
+    const replyDone = new Set(); // "kunci|thread" yang sudah dikirimi
+    async function sendReply(user, key) {
+      const tag = '#' + key;
+      try {
+        let chatId = userChat.get(user.toLowerCase());
+        if (!chatId) { // belum kenal (mis. tab baru di-refresh): cari di daftar chat
+          const r = await rtm('list_chats', { limit: 100 });
+          const c = (r.chats_summary || []).find(c => usernameOf(c).toLowerCase() === user.toLowerCase());
+          chatId = c?.id;
+        }
+        if (!chatId) return log(tag + ' batal: chat ' + user + ' tidak ketemu');
+        const ch = await rtm('get_chat', { chat_id: chatId });
+        const t = ch.thread || {};
+        if (t.active === false) return log(tag + ' batal: chat ' + user + ' sudah selesai');
+        if (!mine(ch.users)) return log(tag + ' batal: chat ' + user + ' bukan punya lo');
+        if (replyDone.has(key + '|' + t.id)) return log(tag + ' sudah pernah dikirim ke ' + user);
+        replyDone.add(key + '|' + t.id);
+        await rtm('send_event', { chat_id: chatId, event: { type: 'message', text: REPLIES[key], visibility: 'all' } });
+        log('✅ ' + tag + ' terkirim ke ' + user);
+      } catch (e) { log('⚠️ ' + tag + ' gagal ke ' + user + ': ' + e.message); }
+    }
+
+    // ambil antrean balasan dari panel (satu antrean per kunci: /pull/dc, /pull/wal)
+    // cuma tab pengirim yang ngambil, biar antrean ga "dimakan" tab lain
+    setInterval(() => {
+      if (!sock || !leader()) return;
+      for (const key of Object.keys(REPLIES))
+        GM_xmlhttpRequest({
+          method: 'GET', url: BRIDGE + '/pull/' + key,
+          onload: r => { if (stopped) return; try { const { user } = JSON.parse(r.responseText); if (user) sendReply(user, key); } catch (e) {} },
+        });
+    }, 2000);
+
+    // habis update tanpa refresh -> langsung numpang koneksi LiveChat yang udah kebuka
+    if (env.sock && env.sock.readyState === 1) attach(env.sock);
+    return {};
+  }
+
+  const WDX = SITE === 'lc' ? initWD() : null;
 
   // #####################################################################
   // BAGIAN B: CS INBOX HELPER (LiveChat & Text)
