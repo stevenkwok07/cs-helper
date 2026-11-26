@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.3.1
-// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil / Tanpa tab). + Tombol Update tanpa refresh.
+// @version      2.4.0
+// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
 // @match        https://text.com/app/*
@@ -1190,7 +1190,8 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
   const WDQ = (() => {
     const BR = 'http://127.0.0.1:8765';
     const P = 'wdq|', R = 'wdres|', UMUR = 5 * 60000;   // antrean lebih tua dari 5 menit dibuang
-    const jalur = () => GM_getValue('wdJalur', 'bridge');
+    // 2.4.0: cuma 2 jalur. 1 Profil = cek di belakang layar (dulu "Tanpa tab"); nilai lama 'profil' ikut jadi itu
+    const jalur = () => { const v = GM_getValue('wdJalur', 'bridge'); return v === 'profil' ? 'langsung' : v; };
     const gx = (method, url, body) => new Promise((res, rej) => GM_xmlhttpRequest({
       method, url, timeout: 5000, headers: { 'Content-Type': 'application/json' },
       data: body ? JSON.stringify(body) : undefined,
@@ -1322,6 +1323,8 @@ Jika bossku ingin menggunakan rekening Bank atau E-Wallet alternatif, silakan be
 Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
     // kunci antrean dari panel -> teks yang dikirim
     const REPLIES = { dc: DC_TEXT, wal: WAL_TEXT };
+    // 2.4.0: false = #dc / #wal TIDAK dikirim otomatis; Cek WD cuma nampilin hasil. true = nyalain lagi.
+    const AUTO_BALAS = false;
 
     if (!WD_AKTIF) return null;
     // tab pengirim diatur bagian Sapaan; kalau Sapaan mati, tab ini dianggap pengirim
@@ -1455,7 +1458,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
     async function viaLangsung(user, chatId) {
       const r = await WDQ.lookup(user);
       if (chatId) { const l = wdLabel(r); set(chatId, l.html, l.title); }
-      const rule = r.found && RULES.find((x) => x.test(r));
+      const rule = AUTO_BALAS && r.found && RULES.find((x) => x.test(r));
       if (rule) sendReply(user, rule.key);
       return r;
     }
@@ -1484,11 +1487,15 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
     }
 
     // ambil antrean balasan dari panel (satu antrean per kunci: /pull/dc, /pull/wal)
-    // cuma tab pengirim yang ngambil, biar antrean ga "dimakan" tab lain
+    // cuma tab pengirim yang ngambil, biar antrean ga "dimakan" tab lain.
+    // 2.4.0: AUTO_BALAS = false -> antrean cuma dibuang (hasil tetap tampil di samping Cek WD), ga ada yang dikirim
     setInterval(async () => {
       if (!sock || !leader()) return;
       for (const key of Object.keys(REPLIES)) {
-        try { const user = await WDQ.pull(key); if (user && !stopped) sendReply(user, key); } catch (e) { /* bridge mati */ }
+        try {
+          const user = await WDQ.pull(key);
+          if (user && !stopped && AUTO_BALAS) sendReply(user, key);
+        } catch (e) { /* bridge mati */ }
       }
     }, 2000);
 
@@ -1579,101 +1586,11 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
   const WDX = SITE === 'lc' ? initWD() : null;
 
   // #####################################################################
-  // BAGIAN E: PANEL UG (halaman transaction) - 2.0.0, cuma nyari kalau Jalur cek WD = "1 Profil"
-  // (2.1.0: di jalur mana pun alamat panelnya dicatat, dipakai jalur "Tanpa tab")
-  // Sama kayak script "Panel UG -> auto search username withdraw", tapi antreannya lewat script ini (tanpa bridge).
-  // Jalur "Bridge": bagian ini diam, pakai script Panel UG yang lama + bridge.py.
+  // BAGIAN E: PANEL UG - 2.4.0: semua jalur cek di belakang layar, halaman panel cuma nyatet alamatnya
+  // (biar ga perlu diisi manual). Nyari lewat tab panel udah ga dipakai lagi.
   // #####################################################################
   function initPanelUG() {
-    GM_setValue('wdPanelUrl', location.origin);   // 2.1.0: alamat panel buat jalur "Tanpa tab"
-    const MAX = 30; // jumlah hasil yang disimpan di box
-    const aktif = () => WDQ.jalur() === 'profil';
-
-    // ---------- box UI ----------
-    const box = document.createElement('div');
-    box.id = 'csw-wdp-box';
-    box.style.cssText = 'position:fixed;right:12px;bottom:12px;width:420px;max-height:50vh;overflow:auto;z-index:99999;' +
-      'background:#fff;border:1px solid #888;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.25);font:12px sans-serif';
-    document.body.appendChild(box);
-    onStop(() => box.remove());
-
-    const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-    let statusText = 'siap';
-    const setStatus = t => { statusText = t; render(); };
-    function render() {
-      box.style.display = aktif() ? '' : 'none';
-      const list = GM_getValue('wdp_hist', []);
-      box.innerHTML =
-        '<div style="position:sticky;top:0;background:#333;color:#fff;padding:6px 8px;display:flex;justify-content:space-between">' +
-        '<b>Cek Withdraw (1 Profil)</b><span>' + esc(statusText) + '</span><a href="#" id="wdp-clear" style="color:#fff">clear</a></div>' +
-        (list.length ? '' : '<div style="padding:8px;color:#888">Belum ada data</div>') +
-        list.map(r => `<div style="padding:6px 8px;border-bottom:1px solid #eee">
-          <b>${esc(r.user)}</b> <span style="color:#888">${esc(r.time)}</span>
-          ${r.rows.length ? r.rows.map(x => `<div>• <b>${esc(x.status)}</b> | ${esc(x.debit)} | ${esc(x.date)}<br>&nbsp; ${esc(x.by)} | ${esc(x.note)}</div>`).join('')
-                           : '<div style="color:#c00">tidak ada transaksi withdraw</div>'}
-        </div>`).join('');
-      box.querySelector('#wdp-clear').onclick = e => { e.preventDefault(); GM_setValue('wdp_hist', []); render(); };
-    }
-    render();
-
-    const scrape = (user) => scrapeRows(document, user);
-
-    function save(user, rows) {
-      const list = GM_getValue('wdp_hist', []).filter(r => r.user !== user);
-      list.unshift({ user, time: new Date().toLocaleTimeString(), rows });
-      GM_setValue('wdp_hist', list.slice(0, MAX));
-      render();
-    }
-
-    // ---------- search ----------
-    let busy = false;
-    function search(user) {
-      const crit = document.getElementById('sel1');          // Search Criteria
-      const input = document.getElementById('user_name');    // kolom Username
-      const btn = document.getElementById('lahanat_member'); // tombol Search
-      if (!crit || !input || !btn) return console.warn('[WD] form tidak ketemu');
-      const $ = PW.jQuery;
-      busy = true;
-      GM_setValue('wdp_pending', user); // kalau Search me-reload halaman, lanjut ditunggu setelah load
-      crit.value = 'user_name';
-      $ ? $(crit).trigger('change') : crit.dispatchEvent(new Event('change', { bubbles: true }));
-      input.value = user;
-      btn.click();
-      setStatus('mencari ' + user + '...');
-      waitResult(user);
-    }
-
-    // tunggu tabel menampilkan baris username ini, maksimal 15 detik
-    function waitResult(user) {
-      busy = true;
-      let n = 0;
-      const stop = every(500, () => {
-        const rows = scrape(user);
-        if ((rows && rows.length) || ++n >= 30) {
-          stop();
-          GM_setValue('wdp_pending', '');
-          const wd = latestWD(rows || []);
-          save(user, wd);
-          setStatus(rows && rows.length ? 'selesai ' + user : 'tidak ketemu ' + user);
-          // hasil -> tampil di samping tombol Cek WD di LiveChat
-          WDQ.setResult(user, Object.assign({ found: !!wd[0] }, wd[0] || {})).catch(() => {});
-          // withdraw terbaru cocok aturan -> minta LiveChat kirim balasannya (#dc / #wal)
-          const rule = wd[0] && RULES.find(x => x.test(wd[0]));
-          if (rule) WDQ.push(rule.key, user).catch(() => {});
-          busy = false;
-        }
-      });
-    }
-    const pending = GM_getValue('wdp_pending', '');
-    if (pending && aktif()) waitResult(pending);
-
-    every(2000, async () => {
-      render();
-      if (busy || !aktif()) return;
-      const user = await WDQ.pull('').catch(() => '');
-      if (user && !stopped) search(user);
-    });
-    console.log('%c[WD panel]', 'color:#0a0;font-weight:bold', 'siap, jalur:', WDQ.jalur());
+    GM_setValue('wdPanelUrl', location.origin);
     return {};
   }
   const PUG = SITE === 'ug' ? initPanelUG() : null;
@@ -2241,9 +2158,8 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         + (SAPA ? '<div class="r" data-row="sapa" title="Utama = langsung sapa. Cadangan = sapa cuma kalau komputer Utama belum nyapa (±5 dtk). '
           + '1 akun di 2 komputer: pilih Utama di SATU komputer saja."><span class="t">Sapaan otomatis</span>'
           + '<button type="button" class="mode"></button></div>' : '')
-        + (SITE === 'lc' ? '<div class="r" data-row="jalur" title="Bridge = pakai bridge.py (panel UG di profil / komputer lain). '
-          + '1 Profil = tab panel UG kebuka di profil Chrome yang sama. '
-          + 'Tanpa tab = langsung tanya panel UG di belakang layar (cukup login panel di Chrome ini)."><span class="t">Jalur cek WD</span>'
+        + (SITE === 'lc' ? '<div class="r" data-row="jalur" title="Bridge = panel UG login di profil lain (bridge.py + tab worker 127.0.0.1:8765/worker di profil panel). '
+          + '1 Profil = panel UG login di profil Chrome ini, dicek di belakang layar tanpa bridge & tanpa buka panel."><span class="t">Jalur cek WD</span>'
           + '<button type="button" class="mode jalur"></button></div>' : '')
         + '<div class="r u" title="Update script tanpa refresh halaman"><span class="t v"></span>'
         + '<button type="button" data-act="upd">Cek update</button></div>';
@@ -2265,7 +2181,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
       const jb = nat.querySelector('.jalur');
       if (jb) {
         const j = WDQ.jalur();
-        setText(jb, { profil: '1 Profil', langsung: 'Tanpa tab' }[j] || 'Bridge');
+        setText(jb, j === 'langsung' ? '1 Profil' : 'Bridge');
         if (jb.dataset.m !== j) jb.dataset.m = j;
       }
       const ub = nat.querySelector('[data-act=upd]');
@@ -2307,7 +2223,7 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         if (!r || r.classList.contains('u')) return;
         e.preventDefault();
         if (r.dataset.row === 'jalur') {
-          const urut = ['bridge', 'profil', 'langsung'];
+          const urut = ['bridge', 'langsung'];
           const next = urut[(urut.indexOf(WDQ.jalur()) + 1) % urut.length];
           // Tanpa tab butuh alamat panel: kalau belum kecatat, tanya sekali
           if (next === 'langsung' && !GM_getValue('wdPanelUrl', '') && !askPanelUrl()) { WDQ.setJalur('bridge'); natFill(); return; }
