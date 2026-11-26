@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.3.0
+// @version      2.3.1
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil / Tanpa tab). + Tombol Update tanpa refresh.
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -1202,16 +1202,24 @@ Semoga apa pun hasil hari ini, Bosku tetap kuat, sabar, dan optimis. 🙏✨ Kal
     // waktu halaman transaction panel UG pernah dibuka sekali di profil ini.
     let tok = '';
     const gt = (method, url, data) => new Promise((res, rej) => GM_xmlhttpRequest({
-      method, url, data, timeout: 15000,
+      method, url, data, timeout: 15000, anonymous: false,   // pakai cookie login panel di Chrome ini
       headers: data ? { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' } : {},
       onload: res, onerror: () => rej(new Error('panel UG ga bisa dihubungi')), ontimeout: () => rej(new Error('panel UG timeout')),
     }));
     const parse = (html) => new DOMParser().parseFromString(html || '', 'text/html');
     async function token(base) {
-      const d = parse((await gt('GET', base + '/transaction')).responseText);
+      const r = await gt('GET', base + '/transaction');
+      const d = parse(r.responseText);
       const t = d.querySelector('input[name="_token"]');
-      if (!t || !d.getElementById('lahanat_member')) throw new Error('panel UG belum login (login dulu di Chrome ini)');
-      return (tok = t.value);
+      if (t && d.getElementById('lahanat_member')) return (tok = t.value);
+      // 2.3.1: diagnosa - panel ngasih apa sebenarnya
+      let path = '';
+      try { const u = new URL(r.finalUrl || base); path = (u.origin !== base ? u.host : '') + u.pathname; } catch (e) { /* */ }
+      const info = `HTTP ${r.status || '?'} ${path} "${(d.title || '').trim().slice(0, 40)}"`;
+      console.log('%c[WD] panel ngasih:', 'color:#c00', info, (r.responseText || '').slice(0, 300));
+      if (d.querySelector('input[name="p"], input[type="password"]'))
+        throw new Error('panel UG belum login: dilempar ke halaman login (' + info + ')');
+      throw new Error('halaman panel ga dikenal (' + info + ') - alamat panel bener?');
     }
     const pad = (n) => String(n).padStart(2, '0');
     const ymd = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
