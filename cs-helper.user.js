@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.6.1
+// @version      2.6.2
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh. + (LiveChat) catat nama CS yang membalas (disimpan lokal, disetor berkala ke Google Drive, double-click pesan agent = "Dibalas oleh").
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -2296,7 +2296,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
     // (IndexedDB): jam, Nama saya, ID member, nama web, akun, isi. Tiap SETOR_MENIT disetor sekaligus ke Google Drive.
     // Sapaan / auto reply / #dc / #wal dari script TIDAK ikut tercatat (bukan lewat kolom balasan).
     // Double-click bubble agent -> popup "Dibalas oleh" (punya sendiri langsung; komputer lain dari Google sesudah disetor;
-    // belum disetor -> "Nama kawan" sebagai perkiraan). Isi pesan TIDAK diubah, member tidak melihat apa pun.
+    // belum disetor -> "Kawan"). Isi pesan TIDAK diubah, member tidak melihat apa pun.
     const COMPOSER = '[data-testid="chat-feed-text-area-test-id"]';
     // cfg.log = [[jam, Nama saya, Nama kawan], ...] riwayat setelan -> pesan lama tetap diberi nama yang berlaku SAAT itu.
     if (!Array.isArray(cfg.log)) cfg.log = [];
@@ -2565,11 +2565,10 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
             if (v) { showWho(x, y, okHtml(v[0], v[1])); return; }
           } catch (er) { log('cari gagal', er); }
         }
-        // belum ada di Google (komputer lain belum setor) -> perkiraan "Nama kawan" (akun sama, bukan dari komputer ini)
+        // 2.6.2: belum ada di Google (komputer lain belum setor) -> tampil "Kawan" (akun sama, bukan dari komputer ini)
         const S = lcState(), ts = ev && +ev.timestampInMs;
-        const L = ts && namesAt(ts);
-        if (ev && isAgentMsg(ev) && L && L[2] && S && ev.authorId === myLogin(S, id.split('_')[0])) {
-          showWho(x, y, okHtml(L[2], ts, 'perkiraan')); return;
+        if (ev && ts && isAgentMsg(ev) && S && ev.authorId === myLogin(S, id.split('_')[0])) {
+          showWho(x, y, okHtml('Kawan', ts, 'belum disetor')); return;
         }
         showWho(x, y, 'Nama belum tercatat<br><span class="s">Belum disetor dari komputer lain (tiap ' + SETOR_MENIT
           + ' mnt) / pesan sebelum script / bot.</span>');
@@ -2717,8 +2716,6 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         // 2.6.0 nama CS yang membalas
         + (SITE === 'lc' ? '<div class="r n" title="Nama saya = nama CS yang memakai komputer ini. Ganti setiap ganti shift / ganti orang.">'
           + '<span class="t">Saya</span><input type="text" maxlength="30" placeholder="isi nama" data-k="name"></div>'
-          + '<div class="r n" title="Nama kawan = nama CS di komputer sebelah (akun LiveChat sama). Dipakai sebagai perkiraan untuk balasannya yang belum disetor ke Google.">'
-          + '<span class="t">Kawan</span><input type="text" maxlength="30" placeholder="isi nama" data-k="mate"></div>'
           + '<div class="r x" title="Catatan nama di komputer ini yang belum disetor ke Google. Klik = setor sekarang.">'
           + '<span class="t">Setor sekarang</span><span class="t c"></span></div>' : '')
         + '<div class="r u" title="Update script tanpa refresh halaman"><span class="t v"></span>'
