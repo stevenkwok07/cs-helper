@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.5.4
-// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh.
+// @version      2.6.0
+// @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh. + (LiveChat) catat nama CS yang membalas (disimpan lokal, disetor berkala ke Google Drive, double-click pesan agent = "Dibalas oleh").
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
 // @match        https://text.com/app/*
@@ -19,6 +19,8 @@
 // @connect      raw.githubusercontent.com
 // @connect      gist.githubusercontent.com
 // @connect      127.0.0.1
+// @connect      script.google.com
+// @connect      script.googleusercontent.com
 // @connect      *
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/stevenkwok07/cs-helper/main/cs-helper.user.js
@@ -2031,7 +2033,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       for (const e of Object.values(evs)) {
         // hanya pesan yang terlihat member (customer / agent); Internal note (supervisor) & event sistem / rating dilewati
         if (!e || e.isDeleted || (e.authorType !== 'customer' && e.authorType !== 'agent')) continue;
-        if (!/^(message|file|rich_message)$/.test(e.type)) continue;
+        if (!/^(message|file|attachment|rich_message)$/.test(e.type)) continue;   // 2.6.0: + attachment (gambar member)
         if (!last || (+e.timestampInMs || 0) > (+last.timestampInMs || 0)) last = e;
       }
       const r = { status: +th.status, cur: th.currentAgentId || '', last };
@@ -2278,12 +2280,302 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) { /* penuh / diblok */ }
     }
     // setelan per browser: blue = tandai semua yang belum dibalas, red = merah sesudah redMin menit, auto = bersihkan closed
-    const cfg = { blue: true, red: true, redMin: 2, auto: true };
+    const cfg = { blue: true, red: true, redMin: 2, auto: true, name: '', mate: '', log: [] };   // 2.6.0 + nama saya / kawan
     try {
       cfg.auto = localStorage.getItem(KEY_AUTO) !== '0';
       Object.assign(cfg, JSON.parse(localStorage.getItem(KEY_SET)) || {});
     } catch (e) { /* */ }
     function saveCfg() { try { localStorage.setItem(KEY_SET, JSON.stringify(cfg)); } catch (e) { /* */ } }
+
+    // ===================== 2.6.0 NAMA CS YANG MEMBALAS (dari "Inbox Helper" 1.7.2, hanya LiveChat) =====================
+    // Isi SEKALI (sama di semua komputer): link Web app Apps Script + kode rahasia (= KEY di Apps Script).
+    const WHO_URL = 'https://script.google.com/macros/s/AKfycbz7yrPzilAT82CWh590kJMp-j2IFUU1hYrmb6QNr1kfKKg-VhIomEubsNKxCvQCtb3bXg/exec';
+    const WHO_KEY = 'Tester123';
+    const SETOR_MENIT = 10;    // catatan dikumpulkan di browser, disetor ke Google sekali tiap n menit
+    // Cara kerja: balasan yang dikirim MANUAL dari komputer ini (Enter / Send / file di kolom balasan) dicatat di browser
+    // (IndexedDB): jam, Nama saya, ID member, nama web, akun, isi. Tiap SETOR_MENIT disetor sekaligus ke Google Drive.
+    // Sapaan / auto reply / #dc / #wal dari script TIDAK ikut tercatat (bukan lewat kolom balasan).
+    // Double-click bubble agent -> popup "Dibalas oleh" (punya sendiri langsung; komputer lain dari Google sesudah disetor;
+    // belum disetor -> "Nama kawan" sebagai perkiraan). Isi pesan TIDAK diubah, member tidak melihat apa pun.
+    const COMPOSER = '[data-testid="chat-feed-text-area-test-id"]';
+    // cfg.log = [[jam, Nama saya, Nama kawan], ...] riwayat setelan -> pesan lama tetap diberi nama yang berlaku SAAT itu.
+    if (!Array.isArray(cfg.log)) cfg.log = [];
+    if (!cfg.log.length && (cfg.name || cfg.mate)) cfg.log.push([Date.now(), cfg.name, cfg.mate]);
+    function nameLog() {
+      const L = cfg.log[cfg.log.length - 1];
+      if (L && L[1] === cfg.name && L[2] === cfg.mate) return;
+      cfg.log.push([Date.now(), cfg.name, cfg.mate]);
+      if (cfg.log.length > 400) cfg.log = cfg.log.slice(-400);
+      saveCfg();
+    }
+    function namesAt(ts) {                     // setelan yang berlaku pada jam ts (null = sebelum diisi pertama kali)
+      let r = null;
+      for (const L of cfg.log) { if (L[0] <= ts) r = L; else break; }
+      return r;
+    }
+    // IndexedDB 'csInboxWho2' (sama dengan Inbox Helper 1.7.x -> catatan lama tetap terbaca):
+    // {id, t thread, c chat, n nama CS, ts, a akun login, w nama web, m member, x isi, up 0|1}
+    const MEM = new Map();
+    let db = null;
+    const dbReady = new Promise((res) => {
+      if (SITE !== 'lc') return res();
+      try {
+        const rq = indexedDB.open('csInboxWho2', 1);
+        rq.onupgradeneeded = () => rq.result.createObjectStore('who', { keyPath: 'id' });
+        rq.onsuccess = () => {
+          if (stopped) { rq.result.close(); return res(); }
+          db = rq.result;
+          const all = db.transaction('who').objectStore('who').getAll();
+          all.onsuccess = () => { for (const r of all.result || []) MEM.set(r.id, r); res(); };
+          all.onerror = () => res();
+        };
+        rq.onerror = () => res();
+      } catch (e) { res(); }
+    });
+    onStop(() => { try { if (db) db.close(); } catch (e) { /* */ } db = null; });
+    function putMany(recs) {
+      for (const r of recs) MEM.set(r.id, r);
+      try { if (db) { const os = db.transaction('who', 'readwrite').objectStore('who'); for (const r of recs) os.put(r); } } catch (e) { /* */ }
+    }
+    function localClean() {                    // sudah disetor & > 7 hari -> dihapus dari browser (arsip ada di Drive)
+      const cut = Date.now() - 7 * 86400000;
+      try {
+        const os = db.transaction('who', 'readwrite').objectStore('who');
+        for (const [id, r] of MEM) if (r.up && r.ts < cut) { os.delete(id); MEM.delete(id); }
+      } catch (e) { /* */ }
+    }
+    const isAgentMsg = (e) => e && e.authorType === 'agent' && !e.isDeleted
+      && /^(message|file|attachment|rich_message)$/.test(e.type) && /^[A-Z0-9]+_\d+$/.test(e.id || '');
+    function lcState() { const s = lcStore(); try { return s && s.getState(); } catch (e) { return null; } }
+    function myLogin(S, tid) {                // akun LiveChat yang login (dipakai bersama) / pemegang chat
+      let a = '';
+      try { a = S.entities.agents.loggedInAgentLogin || ''; } catch (e) { /* */ }
+      if (!a) { try { a = S.entities.chats.threads[tid].currentAgentId || ''; } catch (e) { /* */ } }
+      return a;
+    }
+    const WEBN = {};                          // login -> nama tampilan (MEGA288)
+    function webName(S, login) {
+      if (WEBN[login]) return WEBN[login];
+      let n = '';
+      try {
+        const ag = S.entities.agents.agents || {};
+        const list = ag.byIds ? Object.values(ag.byIds) : Array.isArray(ag) ? ag : Object.values(ag);
+        const a = ag[login] || (ag.byIds && ag.byIds[login]) || list.find((x) => x && (x.login === login || x.id === login || x.email === login));
+        n = (a && (a.name || a.displayName || a.nickname)) || '';
+      } catch (e) { /* */ }
+      if (!n) {                               // cadangan: nama di atas bubble agent pada chat yang terbuka
+        for (const b of document.querySelectorAll('[data-testid="agent-message"],[data-testid="agent-rich_message"]')) {
+          const g = b.closest('[class]') && b.parentElement && b.parentElement.parentElement;
+          const lab = g && [...g.querySelectorAll('span,div,p')].find((x) => !x.children.length && /^\S.{0,30}$/.test(txt(x))
+            && !b.contains(x) && !/^\d{1,2}[:.]\d{2}/.test(txt(x)) && !/^(read|sent|delivered)/i.test(txt(x)));
+          if (lab) { n = txt(lab); break; }
+        }
+      }
+      if (n) WEBN[login] = n;
+      return n;
+    }
+
+    // catat ISI yang dikirim (teks kolom balasan saat Enter / Send) -> nanti dicocokkan dengan pesan yang muncul
+    const whoPend = new Map();                // thread -> [{at, text | file}] kiriman dari komputer ini yang belum ketemu pesannya
+    const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    function onSend(x) {
+      const tid = location.pathname.split('/').filter(Boolean).pop() || '';
+      if (!/^[A-Z0-9]{6,}$/.test(tid)) return;
+      const text = norm(x && x.text), file = !!(x && x.file);
+      if (!text && !file) return;               // Enter di kolom kosong -> bukan kiriman
+      const L = whoPend.get(tid) || [];
+      if (!file && L.some((p) => p.text === text && Date.now() - p.at < 3000)) return;   // Enter + klik Send yang sama
+      L.push({ at: Date.now() - 1500, text, file });
+      whoPend.set(tid, L);
+    }
+    const composerText = () => { const c = document.querySelector(COMPOSER); return c ? c.innerText || c.textContent || '' : ''; };
+    const sendHook = (e) => {
+      const t = e.target;
+      if (!t || !t.closest) return;
+      if (e.type === 'keydown') {
+        if (e.key !== 'Enter' || e.shiftKey || e.isComposing || !t.closest(COMPOSER)) return;
+        onSend({ text: composerText() });
+      } else if (e.type === 'click') {
+        const b = t.closest('button,[role="button"]');
+        if (!b) return;
+        const lab = ((b.getAttribute('aria-label') || '') + ' ' + (b.textContent || '') + ' ' + (b.getAttribute('data-testid') || '')).trim();
+        if (/(^|\s)send(\s|$)|send-button|kirim/i.test(lab)) onSend({ text: composerText() });
+      } else if (e.type === 'change') {
+        if (t.matches && t.matches('input[type="file"]') && t.files && t.files.length) onSend({ file: true });
+      } else if (t.closest(COMPOSER)) {          // paste / drop file ke kolom balasan
+        const dt = e.clipboardData || e.dataTransfer;
+        if (dt && dt.files && dt.files.length) onSend({ file: true });
+      }
+    };
+    if (SITE === 'lc') for (const ev of ['keydown', 'click', 'paste', 'drop', 'change']) on(window, ev, sendHook, true);
+    // isi balasan ikut dicatat (maks 1000 huruf) -> tampil & bisa dicari di halaman Search
+    const msgText = (e) => {
+      if (/^(file|attachment)$/.test(e.type)) return '[file] ' + (e.name || '');
+      let t = e.text || '';
+      if (!t && e.type === 'rich_message') { try { t = JSON.stringify(e.elements || e.template || '').replace(/[{}"[\]]/g, ' '); } catch (x) { /* */ } }
+      return String(t).slice(0, 1000);
+    };
+    const sameText = (ev, want) => {
+      const t = norm(ev.text);
+      if (!t || !want) return false;
+      return t === want || (want.length >= 20 && t.slice(0, 40) === want.slice(0, 40));
+    };
+    function whoTrack() {
+      if (SITE !== 'lc' || !db || !whoPend.size) return;
+      const S = lcState();
+      const byIds = S && S.entities.chats.events && S.entities.chats.events.byIds;
+      if (!byIds) return;
+      const now = Date.now(), out = [];
+      for (const [tid, list] of whoPend) {
+        const used = new Set();
+        const evs = Object.values(byIds[tid] || {})
+          .filter((e) => isAgentMsg(e) && !MEM.has(e.id))
+          .sort((a, b) => a.timestampInMs - b.timestampInMs);
+        const left = [];
+        for (const p of list) {                // tiap kiriman -> pesan agent pertama sesudahnya dengan ISI yang sama
+          const e = evs.find((x) => !used.has(x.id) && (+x.timestampInMs || 0) >= p.at
+            && (p.file ? /^(file|attachment)$/.test(x.type) : sameText(x, p.text)));
+          if (!e) { if (now - p.at < 60000) left.push(p); continue; }   // belum muncul: tunggu maks 1 menit
+          used.add(e.id);
+          const ts = +e.timestampInMs, L = namesAt(ts) || [0, cfg.name, cfg.mate];
+          let th = {};
+          try { th = S.entities.chats.threads[tid] || {}; } catch (x) { /* */ }
+          const a = String(e.authorId || myLogin(S, tid) || '');
+          out.push({ id: e.id, t: tid, c: th.chatId || '', n: L[1] || cfg.name || '(nama kosong)', ts, a,
+            w: webName(S, a), m: th.customerName || '', x: msgText(e), up: 0 });
+        }
+        if (left.length) whoPend.set(tid, left); else whoPend.delete(tid);
+      }
+      if (out.length) putMany(out);
+    }
+    if (SITE === 'lc') setInterval(() => { try { whoTrack(); } catch (e) { console.error('[CS Inbox]', e); } }, 2000);
+
+    // ---------- setor ke Google (sekali tiap SETOR_MENIT, paket berisi banyak catatan) ----------
+    function http(method, url, body) {
+      return new Promise((res, rej) => {
+        GM_xmlhttpRequest({ method, url, data: body, timeout: 60000,
+          headers: body ? { 'Content-Type': 'text/plain;charset=utf-8' } : undefined,
+          onload: (r) => { try { res(JSON.parse(r.responseText)); } catch (e) { rej(new Error('jawaban bukan JSON')); } },
+          onerror: () => rej(new Error('jaringan error')), ontimeout: () => rej(new Error('timeout')) });
+      });
+    }
+    const whoOn = SITE === 'lc' && !!(WHO_URL && WHO_KEY);
+    let upBusy = false, upLast = 0, upErr = '';
+    const pending = () => { let n = 0; for (const r of MEM.values()) if (!r.up) n++; return n; };
+    async function upload(force) {
+      if (!whoOn || upBusy || !db) return;
+      const now = Date.now();
+      if (!force && now - upLast < SETOR_MENIT * 60000) return;
+      const recs = [...MEM.values()].filter((r) => !r.up).sort((a, b) => a.ts - b.ts);
+      upLast = now;
+      if (!recs.length) return;
+      upBusy = true;
+      natFill();
+      try {
+        for (let i = 0; i < recs.length; i += 2000) {
+          const part = recs.slice(i, i + 2000);
+          const r = await http('POST', WHO_URL, JSON.stringify({ k: WHO_KEY,
+            rows: part.map((x) => [x.ts, x.id, x.t, x.c, x.n, x.m, x.w, x.a, x.x || '']) }));
+          if (!r || !r.ok) throw new Error((r && r.err) || 'ditolak');
+          putMany(part.map((x) => Object.assign({}, x, { up: 1 })));
+        }
+        upErr = '';
+        localClean();
+      } catch (e) {
+        upErr = String((e && e.message) || e || 'gagal');
+        upLast = now - SETOR_MENIT * 60000 + 120000;     // gagal -> coba lagi 2 menit lagi
+        log('setor gagal', e);
+      }
+      upBusy = false;
+      natFill();
+    }
+    if (whoOn) setInterval(() => { upload(false); }, 30000);
+
+    // ---------- popup "Dibalas oleh" (double-click pesan agent) ----------
+    function msgId(el) {
+      const m = el.closest('[data-testid="agent-message"],[data-testid="agent-rich_message"],[data-testid^="agent-"]');
+      if (!m) return null;
+      for (let e = m, d = 0; e && d < 4; e = e.parentElement, d++) {
+        const r = e.querySelectorAll('[data-testid$="-reaction"]');
+        if (r.length === 1) return r[0].getAttribute('data-testid').replace(/-reaction$/, '');
+        if (r.length > 1) break;
+      }
+      return null;
+    }
+    function findEvent(id) {                  // data pesan di memori LiveChat (chat aktif atau Archive)
+      const S = lcState();
+      if (!S) return null;
+      const tid = id.split('_')[0];
+      try { const e = S.entities.chats.events.byIds[tid][id]; if (e) return e; } catch (x) { /* */ }
+      const seen = new Set();
+      const walk = (o, d) => {
+        if (!o || typeof o !== 'object' || d > 6 || seen.has(o)) return null;
+        seen.add(o);
+        if (o.id === id && o.timestampInMs) return o;
+        if (o[id] && o[id].timestampInMs) return o[id];
+        for (const v of Array.isArray(o) ? o : Object.values(o)) { const r = walk(v, d + 1); if (r) return r; }
+        return null;
+      };
+      try { return walk(S.entities.chats.chatsHistory, 0) || walk(S.views.archivesView, 0); } catch (x) { return null; }
+    }
+    const SRV = new Map();                    // id -> [nama, ts] dari Google (cache)
+    const asked = new Map();                  // thread -> jam terakhir ditanya
+    async function askServer(id, ev) {
+      if (SRV.has(id) || !whoOn) return SRV.get(id) || null;
+      const tid = id.split('_')[0];
+      if (Date.now() - (asked.get(tid) || 0) < 15000) return null;
+      asked.set(tid, Date.now());
+      const S = lcState();
+      const login = String((ev && ev.authorId) || (S && myLogin(S, tid)) || '');
+      const q = '?a=who&k=' + encodeURIComponent(WHO_KEY) + '&thread=' + encodeURIComponent(tid)
+        + '&login=' + encodeURIComponent(login) + (ev && ev.timestampInMs ? '&ts=' + (+ev.timestampInMs) : '');
+      const r = await http('GET', WHO_URL + q);
+      if (r && r.ok && r.rows) for (const k of Object.keys(r.rows)) SRV.set(k, r.rows[k]);
+      return SRV.get(id) || null;
+    }
+    let pop = null, popT = 0;
+    function showWho(x, y, html) {
+      if (stopped) return;
+      if (!pop) { pop = document.createElement('div'); pop.id = 'csw-who'; document.body.appendChild(pop); }
+      pop.innerHTML = html;
+      pop.style.display = '';
+      const w = pop.offsetWidth, h = pop.offsetHeight;
+      pop.style.left = Math.max(8, Math.min(x - w / 2, innerWidth - w - 8)) + 'px';
+      pop.style.top = (y - h - 12 < 8 ? y + 16 : y - h - 12) + 'px';
+      window.clearTimeout(popT);
+      popT = setTimeout(() => { if (pop) pop.style.display = 'none'; }, 4000);
+    }
+    onStop(() => { if (pop) pop.remove(); pop = null; });
+    const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const hhmm = (ms) => { const d = new Date(ms); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+    const okHtml = (n, ts, note) => 'Dibalas oleh <b>' + esc(n) + '</b> <span class="s">· ' + hhmm(ts) + (note ? ' · ' + note : '') + '</span>';
+    if (SITE === 'lc') {
+      on(document, 'dblclick', async (e) => {
+        const id = e.target && e.target.closest && msgId(e.target);
+        if (!id) return;
+        const x = e.clientX, y = e.clientY;
+        await dbReady;
+        const own = MEM.get(id);
+        if (own) { showWho(x, y, okHtml(own.n, own.ts)); return; }
+        const ev = findEvent(id);
+        if (whoOn) {
+          showWho(x, y, '<span class="s">Mencari nama…</span>');
+          try {
+            const v = await askServer(id, ev);
+            if (v) { showWho(x, y, okHtml(v[0], v[1])); return; }
+          } catch (er) { log('cari gagal', er); }
+        }
+        // belum ada di Google (komputer lain belum setor) -> perkiraan "Nama kawan" (akun sama, bukan dari komputer ini)
+        const S = lcState(), ts = ev && +ev.timestampInMs;
+        const L = ts && namesAt(ts);
+        if (ev && isAgentMsg(ev) && L && L[2] && S && ev.authorId === myLogin(S, id.split('_')[0])) {
+          showWho(x, y, okHtml(L[2], ts, 'perkiraan')); return;
+        }
+        showWho(x, y, 'Nama belum tercatat<br><span class="s">Belum disetor dari komputer lain (tiap ' + SETOR_MENIT
+          + ' mnt) / pesan sebelum script / bot.</span>');
+      }, true);
+      on(document, 'mousedown', () => { if (pop) pop.style.display = 'none'; }, true);
+    }
 
     // ---------- urutan (CSS order, node React tidak dipindah) ----------
     function applyOrder(box, items, dir) {
@@ -2344,6 +2636,16 @@ html[data-csw-dark] #csw-bar .csw-need.red{background:#e5484d;color:#fff}
 #csw-native input[type=number]{width:28px;height:20px;box-sizing:border-box;padding:0 2px;border:1px solid rgba(128,128,128,.45);
   border-radius:4px;font:inherit;text-align:center;background:transparent;color:inherit;-moz-appearance:textfield}
 #csw-native input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+#csw-native input[type=text]{width:96px;height:22px;box-sizing:border-box;padding:0 6px;border:1px solid rgba(128,128,128,.45);
+  border-radius:4px;font:inherit;background:transparent;color:inherit}
+#csw-native input[type=text]:placeholder-shown{border-color:#e5484d}
+#csw-native .x .c{opacity:.6;font-size:.9em}
+/* 2.6.0 popup "Dibalas oleh" (double-click pesan agent) */
+#csw-who{position:fixed;z-index:2147483001;max-width:260px;padding:7px 10px;border-radius:8px;background:#fff;color:#1b1d21;
+  box-shadow:0 4px 18px rgba(0,0,0,.22);font:500 12px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;pointer-events:none}
+#csw-who b{font-weight:700}
+#csw-who .s{opacity:.65;font-size:11px}
+html[data-csw-dark] #csw-who{background:#2b2e34;color:#eceef2;box-shadow:0 4px 18px rgba(0,0,0,.5)}
 #csw-native .sw{position:relative;width:32px;height:16px;border-radius:999px;background:#8b8f98;border:0;padding:0;flex:none;
   cursor:pointer;transition:background .15s}
 #csw-native .sw::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#fff;
@@ -2412,6 +2714,13 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         + (SITE === 'lc' ? '<div class="r" data-row="jalur" title="Bridge = panel UG login di profil lain (bridge.py + tab worker 127.0.0.1:8765/worker di profil panel). '
           + '1 Profil = panel UG login di profil Chrome ini, dicek di belakang layar tanpa bridge & tanpa buka panel."><span class="t">Jalur cek WD</span>'
           + '<button type="button" class="mode jalur"></button></div>' : '')
+        // 2.6.0 nama CS yang membalas
+        + (SITE === 'lc' ? '<div class="r n" title="Nama CS yang memakai komputer ini. Ganti setiap ganti shift / ganti orang.">'
+          + '<span class="t">Nama saya</span><input type="text" maxlength="30" placeholder="isi nama" data-k="name"></div>'
+          + '<div class="r n" title="Nama CS di komputer sebelah (akun LiveChat sama). Dipakai sebagai perkiraan untuk balasannya yang belum disetor ke Google.">'
+          + '<span class="t">Nama kawan</span><input type="text" maxlength="30" placeholder="isi nama" data-k="mate"></div>'
+          + '<div class="r x" title="Catatan nama di komputer ini yang belum disetor ke Google. Klik = setor sekarang.">'
+          + '<span class="t">Setor sekarang</span><span class="t c"></span></div>' : '')
         + '<div class="r u" title="Update script tanpa refresh halaman"><span class="t v"></span>'
         + '<button type="button" data-act="upd">Cek update</button></div>';
     }
@@ -2421,8 +2730,15 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         const v = cfg[b.dataset.k] ? 'true' : 'false';
         if (b.getAttribute('aria-checked') !== v) b.setAttribute('aria-checked', v);
       }
-      const i = nat.querySelector('input[data-k]');
-      if (document.activeElement !== i && i.value !== String(cfg.redMin)) i.value = cfg.redMin;
+      const i = nat.querySelector('input[data-k="redMin"]');
+      if (i && document.activeElement !== i && i.value !== String(cfg.redMin)) i.value = cfg.redMin;
+      for (const k of ['name', 'mate']) {          // 2.6.0
+        const n = nat.querySelector('input[data-k="' + k + '"]');
+        if (n && document.activeElement !== n && n.value !== String(cfg[k] || '')) n.value = cfg[k] || '';
+      }
+      const c = nat.querySelector('.x .c');
+      if (c) setText(c, !whoOn ? 'link belum diisi' : upBusy ? 'menyetor…' : upErr ? 'gagal: ' + upErr.slice(0, 30)
+        : pending() + ' antre');
       const mb = nat.querySelector('.mode');
       if (mb && SAPA) {
         const m = SAPA.getMode();
@@ -2472,7 +2788,9 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
         if (e.target.closest('input')) return;
         const r = e.target.closest('.r');
         if (!r || r.classList.contains('u')) return;
+        if (r.classList.contains('n')) { const inp = r.querySelector('input'); if (inp) inp.focus(); return; }   // 2.6.0
         e.preventDefault();
+        if (r.classList.contains('x')) { upload(true); natFill(); return; }                                     // 2.6.0
         if (r.dataset.row === 'jalur') {
           const urut = ['bridge', 'langsung'];
           const next = urut[(urut.indexOf(WDQ.jalur()) + 1) % urut.length];
@@ -2492,6 +2810,11 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
       });
       nat.addEventListener('change', (e) => {
         const i = e.target;
+        if (i.dataset && (i.dataset.k === 'name' || i.dataset.k === 'mate')) {   // 2.6.0
+          natSet(i.dataset.k, i.value.replace(/\s+/g, ' ').trim().slice(0, 30));
+          nameLog();                        // catat jam ganti nama (pesan sesudahnya pakai nama baru)
+          return;
+        }
         if (!i.dataset || i.dataset.k !== 'redMin') return;
         const v = Math.round(+i.value);
         if (v >= 1 && v <= 120) natSet('redMin', v); else i.value = cfg.redMin;
@@ -2945,4 +3268,4 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
     document.addEventListener('DOMContentLoaded', go, { once: true });
     window.addEventListener('load', () => { go(); window.setTimeout(go, 3000); }, { once: true });
   }
-})();
+})();
