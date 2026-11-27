@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.6.0
+// @version      2.6.1
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh. + (LiveChat) catat nama CS yang membalas (disimpan lokal, disetor berkala ke Google Drive, double-click pesan agent = "Dibalas oleh").
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -2715,10 +2715,10 @@ html[data-csw-dark] [data-csw="red"][data-csw-t]::after{background:#e5484d;color
           + '1 Profil = panel UG login di profil Chrome ini, dicek di belakang layar tanpa bridge & tanpa buka panel."><span class="t">Jalur cek WD</span>'
           + '<button type="button" class="mode jalur"></button></div>' : '')
         // 2.6.0 nama CS yang membalas
-        + (SITE === 'lc' ? '<div class="r n" title="Nama CS yang memakai komputer ini. Ganti setiap ganti shift / ganti orang.">'
-          + '<span class="t">Nama saya</span><input type="text" maxlength="30" placeholder="isi nama" data-k="name"></div>'
-          + '<div class="r n" title="Nama CS di komputer sebelah (akun LiveChat sama). Dipakai sebagai perkiraan untuk balasannya yang belum disetor ke Google.">'
-          + '<span class="t">Nama kawan</span><input type="text" maxlength="30" placeholder="isi nama" data-k="mate"></div>'
+        + (SITE === 'lc' ? '<div class="r n" title="Nama saya = nama CS yang memakai komputer ini. Ganti setiap ganti shift / ganti orang.">'
+          + '<span class="t">Saya</span><input type="text" maxlength="30" placeholder="isi nama" data-k="name"></div>'
+          + '<div class="r n" title="Nama kawan = nama CS di komputer sebelah (akun LiveChat sama). Dipakai sebagai perkiraan untuk balasannya yang belum disetor ke Google.">'
+          + '<span class="t">Kawan</span><input type="text" maxlength="30" placeholder="isi nama" data-k="mate"></div>'
           + '<div class="r x" title="Catatan nama di komputer ini yang belum disetor ke Google. Klik = setor sekarang.">'
           + '<span class="t">Setor sekarang</span><span class="t c"></span></div>' : '')
         + '<div class="r u" title="Update script tanpa refresh halaman"><span class="t v"></span>'
