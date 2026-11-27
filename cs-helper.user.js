@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.6.2
+// @version      2.6.3
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh. + (LiveChat) catat nama CS yang membalas (disimpan lokal, disetor berkala ke Google Drive, double-click pesan agent = "Dibalas oleh").
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -1638,6 +1638,21 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       return { html: withNote(`<span style="color:#ddd">${escH(s)}</span>`, '#ddd'), title };
     }
     let cekEl = null, cekChat = '';
+    const manualId = new Map();   // 2.6.3: chat_id -> ID yang diketik di box
+    // ID dari box (kosong = '')
+    const boxId = () => {
+      const v = ((document.getElementById('csw-wd-id') || {}).value || '').trim();
+      const c = chatIdNow();
+      if (c) { if (v) manualId.set(c, v); else manualId.delete(c); }
+      return v;
+    };
+    // box diisi -> ID dari box; kosong -> ambil dari chat (pre-chat form / nama)
+    async function userFor(chatId) {
+      const v = boxId();
+      if (v) return v;
+      const ch = await rtm('get_chat', { chat_id: chatId });
+      return usernameOf(ch, ch.thread?.events);
+    }
     function cekShow(chatId, html, title = '') {
       if (chatId === chatIdNow() && cekEl) { const o = cekEl.querySelector('.res'); o.innerHTML = html; o.title = title; }
     }
@@ -1653,15 +1668,26 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
         const bs = 'border:0;border-radius:999px;padding:4px 10px;cursor:pointer;font:inherit;color:#fff;flex:none;background:';
         cekEl.innerHTML = `<button type="button" data-act="wd" style="${bs}#2f6fed">Cek WD</button>`
           + `<button type="button" data-act="to" style="${bs}#7c3aed">Cek TO</button>`
+          // 2.6.3: box ID manual. Diisi -> Cek WD / Cek TO cari ID ini. Kosong -> ambil dari chat kayak biasa.
+          + '<input type="text" id="csw-wd-id" placeholder="ID (opsional)" autocomplete="off" spellcheck="false" style="flex:none;width:120px;height:24px;box-sizing:border-box;padding:0 8px;border:1px solid #555;border-radius:999px;background:#2b2f38;color:#eee;font:inherit;font-weight:500;outline:none">'
           + '<span class="res" style="overflow:hidden;text-overflow:ellipsis"></span>';
         cekEl.querySelector('[data-act=wd]').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); cekWD(); });
         cekEl.querySelector('[data-act=to]').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); cekTO(); });
         cekEl.addEventListener('click', e => { if (e.target.closest('[data-a=recopy]')) { e.preventDefault(); e.stopPropagation(); recopyTO(); } });
+        const inp = cekEl.querySelector('#csw-wd-id');
+        // ketikan di box jangan ditangkap shortcut / kolom chat LiveChat
+        ['keydown', 'keyup', 'keypress', 'input', 'mousedown', 'click', 'paste'].forEach(t => inp.addEventListener(t, e => e.stopPropagation()));
+        inp.addEventListener('keydown', e => {
+          if (e.key === 'Enter') { e.preventDefault(); cekWD(); }   // Enter = Cek WD
+          if (e.key === 'Escape') { e.preventDefault(); inp.value = ''; inp.blur(); }
+        });
       }
       if (h.nextSibling !== cekEl) h.after(cekEl);
       const id = chatIdNow();
       if (id !== cekChat) {          // ganti chat -> tampilkan hasil terakhir chat itu (kalau ada)
         cekChat = id;
+        const inp = cekEl.querySelector('#csw-wd-id');
+        if (inp) inp.value = manualId.get(id) || '';   // isi box diingat per chat
         const r = cekRes.get(id);
         cekShow(id, r ? r.html : '', r ? r.title : '');
       }
@@ -1680,8 +1706,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       if (!sock) return set(chatId, '<span style="color:#ff6b6b">koneksi LiveChat belum siap</span>');
       set(chatId, '<span style="color:#aaa">⏳ mencari...</span>');
       try {
-        const ch = await rtm('get_chat', { chat_id: chatId });
-        const user = usernameOf(ch, ch.thread?.events);
+        const user = await userFor(chatId);
         if (!user) return set(chatId, '<span style="color:#ff6b6b">username tidak ketemu</span>');
         userChat.set(user.toLowerCase(), chatId);
         lastPush.set(user.toLowerCase(), Date.now());   // biar deteksi otomatis ga ngirim dobel
@@ -1761,8 +1786,7 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
 
     // ambil data TO (nunggu worker / tanya panel), lempar error kalau gagal
     async function getTO(chatId) {
-      const ch = await rtm('get_chat', { chat_id: chatId });
-      const user = usernameOf(ch, ch.thread?.events);
+      const user = await userFor(chatId);
       if (!user) throw new Error('username tidak ketemu');
       set(chatId, `<span style="color:#aaa">⏳ cek TO ${escH(user)} di panel...</span>`);
       log('Cek TO ' + user + ' (' + (WDQ.jalur() === 'bridge' ? 'worker' : 'tanpa tab') + ')');
