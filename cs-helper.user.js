@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CS Inbox Helper + Sapaan + Auto Reply (LiveChat & Text)
 // @namespace    botmega-cs
-// @version      2.6.3
+// @version      2.6.4
 // @description  Tandai chat belum dibalas (biru/merah), jumlah Waiting, urut chat transfer, tutup chat Archived. + (LiveChat) sapaan otomatis pagi/siang/sore/malam ke chat baru & chat transfer ("Transferred - by ..."). + Cek withdraw ke panel + auto balas #dc/#wal + tombol Cek WD di header chat (jalur Bridge / 1 Profil, semua di belakang layar). + Tombol Cek TO (sisa Target TO + Promotion Turnover, gambar bisa di-copy). + Tombol Update tanpa refresh. + (LiveChat) catat nama CS yang membalas (disimpan lokal, disetor berkala ke Google Drive, double-click pesan agent = "Dibalas oleh").
 // @match        https://my.livechatinc.com/*
 // @match        https://*.text.com/app/*
@@ -1749,31 +1749,49 @@ Terima kasih atas pengertian dan kesabarannya, bossku ❤️`;
       ps.forEach(p => L.push(`- ${promoName(p)}${p.date ? ' (' + p.date + ')' : ''} sisa TO ${fmtN(p.remaining)}`));
       return L.join('\n');
     }
-    // gambar = kotak Target TO aja (Total Deposit, Reached/Target, progress, Sisa TO)
+    // gambar = kotak Target TO aja, dibikin mirip kartu "Cumulative Deposit Turnover" di panel UG
+    // 2.6.4: gaya panel asli (tulisan kecil tipis, bar bergaris), link "Check Deposit Details" diganti "Sisa TO"
     function toCanvas(r) {
-      const W = 460, H = 142, K = 2;
+      const W = 400, H = 116, K = 3, BAR = 'rgb(222,112,111)', OK = '#28a745';
       const c = document.createElement('canvas');
       c.width = W * K; c.height = H * K;
       const g = c.getContext('2d');
       g.scale(K, K);
-      const F = (w, s) => `${w} ${s}px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif`;
+      const F = (w, s) => `${w} ${s}px Nunito,"Segoe UI",system-ui,-apple-system,Roboto,sans-serif`;
       const txt = (s, x, y, font, col, al = 'left') => { g.font = font; g.fillStyle = col; g.textAlign = al; g.fillText(s, x, y); };
+      // kartu: putih, garis tipis, header abu muda
       g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
-      g.fillStyle = '#f6f7f9'; g.fillRect(0, 0, W, 42);
-      g.strokeStyle = '#e3e6ea'; g.lineWidth = 1; g.strokeRect(.5, .5, W - 1, H - 1);
-      g.beginPath(); g.moveTo(0, 42.5); g.lineTo(W, 42.5); g.stroke();
-      txt('Total Deposit : ', 16, 27, F(500, 13), '#666');
-      const x0 = 16 + g.measureText('Total Deposit : ').width;
-      txt(r.hasTO ? 'IDR ' + fmtN(r.deposit) : '-', x0, 27, F(600, 13), '#f0a020');
-      txt(r.user, W - 16, 27, F(600, 12), '#888', 'right');
-      if (!r.hasTO) { txt('Belum ada TO deposit', 16, 90, F(600, 14), '#d63031'); return c; }
-      txt('Total Reached TO : ' + fmtN(r.reached), 16, 68, F(400, 13), '#666');
-      txt('Target TO : ' + fmtN(r.target), W - 16, 68, F(400, 13), '#666', 'right');
-      const bw = W - 32, done = r.pct >= 100;
-      g.fillStyle = '#e9ecef'; g.beginPath(); g.roundRect(16, 78, bw, 16, 4); g.fill();
-      g.fillStyle = done ? '#28a745' : '#e5484d'; g.beginPath(); g.roundRect(16, 78, Math.max(8, bw * r.pct / 100), 16, 4); g.fill();
-      txt(r.pct.toFixed(2) + '%', done ? 16 + bw / 2 : 22, 90, F(600, 11), done ? '#fff' : '#333', done ? 'center' : 'left');
-      txt('Sisa TO : ' + fmtN(r.sisa), 16, 126, F(700, 17), r.sisa > 0 ? '#d63031' : '#16a34a');
+      g.fillStyle = '#f7f7f7'; g.fillRect(0, 0, W, 38);
+      g.strokeStyle = '#dfdfdf'; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(0, 38.5); g.lineTo(W, 38.5); g.stroke();
+      g.strokeRect(.5, .5, W - 1, H - 1);
+      txt('Total Deposit : ', 14, 23, F(400, 11), '#6c757d');
+      g.font = F(400, 11);
+      const x0 = 14 + g.measureText('Total Deposit : ').width;
+      txt(r.hasTO ? 'IDR ' + fmtN(r.deposit) : '-', x0, 23, F(400, 11), '#f0ad4e');
+      if (!r.hasTO) { txt('Belum ada TO deposit', 14, 72, F(600, 11), BAR); return c; }
+      txt('Total Reached TO : ' + fmtN(r.reached), 14, 62, F(400, 10.5), '#6c757d');
+      txt('Target TO : ' + fmtN(r.target), W - 14, 62, F(400, 10.5), '#6c757d', 'right');
+      // progress bar ala Bootstrap: abu, isi merah bergaris miring, persen putih di tengah isi
+      const bx = 14, by = 69, bw = W - 28, bh = 14, done = r.pct >= 100;
+      const fw = Math.max(0, Math.min(bw, bw * r.pct / 100)), col = done ? OK : BAR;
+      g.fillStyle = '#e9ecef'; g.beginPath(); g.roundRect(bx, by, bw, bh, 3); g.fill();
+      if (fw > 0) {
+        g.save();
+        g.beginPath(); g.roundRect(bx, by, fw, bh, 3); g.clip();
+        g.fillStyle = col; g.fillRect(bx, by, fw, bh);
+        g.fillStyle = 'rgba(255,255,255,.15)';
+        for (let x = bx - bh; x < bx + fw + bh; x += 20) {
+          g.beginPath(); g.moveTo(x, by + bh); g.lineTo(x + 10, by + bh); g.lineTo(x + 10 + bh, by); g.lineTo(x + bh, by); g.closePath(); g.fill();
+        }
+        g.restore();
+      }
+      const pct = r.pct.toFixed(2) + '%';
+      g.font = F(600, 9.5);
+      if (fw >= g.measureText(pct).width + 8) txt(pct, bx + fw / 2, by + 10.5, F(600, 9.5), '#fff', 'center');
+      else txt(pct, bx + fw + 4, by + 10.5, F(600, 9.5), '#495057');
+      // ganti "Check Deposit Details"
+      txt(r.sisa > 0 ? 'Sisa TO : ' + fmtN(r.sisa) : 'Sisa TO : 0.00 (TO tercapai)', 14, 100, F(700, 10.5), r.sisa > 0 ? BAR : OK);
       return c;
     }
     const toBlob = r => new Promise((res, rej) => toCanvas(r).toBlob(b => (b ? res(b) : rej(new Error('gagal bikin gambar'))), 'image/png'));
